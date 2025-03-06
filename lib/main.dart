@@ -1,11 +1,31 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:webview_flutter/webview_flutter.dart'; // Import correto do webview_flutter
-import 'package:flutter_inappwebview/flutter_inappwebview.dart'; // Import correto do flutter_inappwebview
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:http/http.dart' as http;
+import './camera-qr-scanner-widget.dart'; // Import the CameraWithQRScanner widget
+import 'dart:io';
+import 'dart:convert';
+import 'dart:async';
 
-void main() {
-  runApp(const MyApp());
+// URL para enviar dados
+const String apiUrl = 'https://seu-servidor-aqui.com/api/upload';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await SentryFlutter.init(
+    (options) {
+      options.dsn = 'SUA_DSN_DO_SENTRY_AQUI';
+      options.tracesSampleRate = 1.0; // Capture 100% dos traces
+    },
+    appRunner: () => runApp(const MyApp()),
+  );
 }
 
 class MyApp extends StatelessWidget {
@@ -20,6 +40,7 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
       ),
       home: const WebViewDemo(),
+      navigatorObservers: [SentryNavigatorObserver()],
     );
   }
 }
@@ -34,19 +55,55 @@ class WebViewDemo extends StatefulWidget {
 class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _urlController = TextEditingController();
-  String viewType = 'webview_flutter'; // Controla o tipo de WebView
+
   String option = 'A';
   bool showFrame = false;
-  late WebViewController
-      _webViewController; // WebViewController para controle da WebView
-  late InAppWebViewController _inAppWebViewController;
+
+  late final WebViewController _webViewController;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _requestPermissions();
-    _webViewController = WebViewController()
+    _initializeWebView();
+  }
+
+  void _initializeWebView() {
+    // Cria e configura o WebView com persistência
+    late final PlatformWebViewControllerCreationParams params;
+
+    if (WebViewPlatform.instance is WebKitWebViewPlatform) {
+      params = WebKitWebViewControllerCreationParams(
+        allowsInlineMediaPlayback: true,
+        mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
+      );
+    } else {
+      params = const PlatformWebViewControllerCreationParams();
+    }
+
+    final WebViewController controller =
+        WebViewController.fromPlatformCreationParams(params);
+
+    // Configuração específica para Android
+    if (controller.platform is AndroidWebViewController) {
+      AndroidWebViewController.enableDebugging(true);
+      (controller.platform as AndroidWebViewController)
+          .setMediaPlaybackRequiresUserGesture(false);
+
+      // Configurar para persistir dados entre sessões
+      (controller.platform as AndroidWebViewController)
+          .setOnPlatformPermissionRequest(
+              (PlatformWebViewPermissionRequest request) => request.grant());
+    }
+
+    // Configuração específica para iOS (WebKit)
+    if (controller.platform is WebKitWebViewController) {
+      (controller.platform as WebKitWebViewController)
+          .setAllowsBackForwardNavigationGestures(true);
+    }
+
+    controller
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -56,6 +113,9 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           onPageFinished: (String url) {
             debugPrint('Navegação finalizada: $url');
           },
+          onWebResourceError: (WebResourceError error) {
+            _logError('WebView error: ${error.description}');
+          },
           onNavigationRequest: (NavigationRequest request) {
             if (request.url != _urlController.text) {
               return NavigationDecision.prevent;
@@ -63,12 +123,40 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             return NavigationDecision.navigate;
           },
         ),
-      );
+      )
+      ..addJavaScriptChannel(
+        'Flutter',
+        onMessageReceived: (JavaScriptMessage message) {
+          debugPrint('Mensagem do JavaScript: ${message.message}');
+        },
+      )
+      // Configurar para persistência de cookies e localStorage
+      ..setOnConsoleMessage((JavaScriptConsoleMessage message) {
+        debugPrint('Console: ${message.message}');
+      })
+      // Define configurações para persistência
+      ..enableZoom(true)
+      ..setBackgroundColor(Colors.white)
+      ..setUserAgent('Mozilla/5.0 Flutter WebView')
+      // Habilita armazenamento local (localStorage) e cookies
+      ..setJavaScriptMode(JavaScriptMode.unrestricted);
+
+    // Configurar cookies via JavaScript
+    controller.runJavaScript('''
+      document.cookie = "session_persistent=true; domain=.example.com; path=/; expires=${DateTime.now().add(const Duration(days: 365)).toUtc()}";
+      localStorage.setItem('app_initialized', 'true');
+      ''');
+
+    _webViewController = controller;
+  }
+
+  void _logError(String message) {
+    Sentry.captureMessage(message, level: SentryLevel.error);
+    debugPrint('ERROR: $message');
   }
 
   @override
   void dispose() {
-    // Certifique-se de liberar o controlador do WebView
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -78,16 +166,25 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.paused) {
       debugPrint('App minimizado');
-      // Liberar recursos ou pausar processos aqui
+      // Salvar estado da webview se necessário
     } else if (state == AppLifecycleState.resumed) {
       debugPrint('App retomado');
-      // Restaurar recursos ou retomar processos aqui
+      // Restaurar estado da webview se necessário
+    } else if (state == AppLifecycleState.detached) {
+      // App sendo fechado/destruído
+      try {
+        _webViewController.runJavaScript(
+            'localStorage.setItem("app_closed_normally", "true");');
+      } catch (e) {
+        _logError('Erro ao salvar estado antes de fechar: $e');
+      }
     }
   }
 
   Future<void> _requestPermissions() async {
     await [
       Permission.camera,
+      Permission.storage,
     ].request();
   }
 
@@ -104,13 +201,117 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content:
-                  Text('Permissões de câmera e microfone são necessárias.')),
+              content: Text('Permissões de câmera são necessárias.')),
         );
         return false;
       }
     }
     return true;
+  }
+
+  Future<void> _scanQRCodeOrTakePicture() async {
+    try {
+      bool hasPermission = await _checkPermissions();
+      if (!hasPermission) return;
+
+      // Abre um modal customizado com câmera que permite escanear QR code ou tirar foto
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (context) => Container(
+          height: MediaQuery.of(context).size.height * 0.9,
+          decoration: const BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(20),
+              topRight: Radius.circular(20),
+            ),
+          ),
+          child: CameraWithQRScanner(
+            onQRCodeDetected: (String code) async {
+              // Fechar modal quando QR code for detectado
+              Navigator.pop(context);
+
+              // Processar o código QR
+              setState(() {
+                _urlController.text = code;
+                showFrame = true;
+              });
+
+              // Registrar URL escaneada
+              await _sendQrData(code);
+
+              // Carregar URL na WebView
+              await _webViewController.loadRequest(Uri.parse(code));
+            },
+            onPhotoTaken: (String imagePath) async {
+              // Fechar modal quando foto for tirada
+              Navigator.pop(context);
+
+              // Processar a foto
+              await _uploadFile(imagePath, 'image');
+
+              // Informar a WebView sobre a imagem usando JavaScript
+              final String base64Image =
+                  base64Encode(await File(imagePath).readAsBytes());
+              await _webViewController.runJavaScript(
+                  'window.dispatchEvent(new CustomEvent("imageSelected", {detail: "data:image/jpeg;base64,$base64Image"}));');
+            },
+          ),
+        ),
+      );
+    } catch (e, stackTrace) {
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _showError('Erro ao tirar foto ou escanear QR Code: $e');
+    }
+  }
+
+  // Função para enviar dados do QR Code para o servidor
+  Future<void> _sendQrData(String qrData) async {
+    try {
+      final response = await http.post(
+        Uri.parse(apiUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'type': 'qr_code', 'data': qrData}),
+      );
+
+      if (response.statusCode == 200) {
+        debugPrint('QR Code enviado com sucesso');
+      } else {
+        _logError('Erro ao enviar QR Code: ${response.statusCode}');
+      }
+    } catch (e, stackTrace) {
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _logError('Exceção ao enviar QR Code: $e');
+    }
+  }
+
+  // Função para enviar arquivos para o servidor
+  Future<void> _uploadFile(String filePath, String type) async {
+    try {
+      final uri = Uri.parse(apiUrl);
+      final request = http.MultipartRequest('POST', uri);
+
+      request.files.add(await http.MultipartFile.fromPath('file', filePath));
+      request.fields['type'] = type;
+
+      final response = await request.send();
+
+      if (response.statusCode == 200) {
+        debugPrint('Arquivo enviado com sucesso');
+      } else {
+        _logError('Erro ao enviar arquivo: ${response.statusCode}');
+      }
+    } catch (e, stackTrace) {
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _logError('Exceção ao enviar arquivo: $e');
+    }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _openUrl() async {
@@ -119,12 +320,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       switch (option) {
         case 'A':
           // Abrir na mesma página
-          if (viewType == 'webview_flutter') {
-            _webViewController.loadRequest(Uri.parse(url));
-          } else {
-            _inAppWebViewController.loadUrl(
-                urlRequest: URLRequest(url: WebUri(url)));
-          }
+          _webViewController.loadRequest(Uri.parse(url));
           setState(() {
             showFrame = true;
           });
@@ -135,37 +331,24 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             context,
             MaterialPageRoute(
               builder: (context) => Scaffold(
-                body: viewType == 'webview_flutter'
-                    ? WebViewWidget(
-                        controller: WebViewController()
-                          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                          ..setNavigationDelegate(
-                            NavigationDelegate(
-                              onNavigationRequest: (NavigationRequest request) {
-                                if (request.url != url) {
-                                  return NavigationDecision.prevent;
-                                }
-                                return NavigationDecision.navigate;
-                              },
-                            ),
-                          )
-                          ..loadRequest(Uri.parse(url)),
-                      )
-                    : InAppWebView(
-                        initialUrlRequest: URLRequest(url: WebUri(url)),
-                        initialSettings: InAppWebViewSettings(
-                          javaScriptEnabled: true,
-                        ),
-                        onWebViewCreated: (controller) {
-                          _inAppWebViewController = controller;
-                        },
-                        shouldOverrideUrlLoading: (controller, request) async {
-                          if (request.request.url.toString() != url) {
-                            return NavigationActionPolicy.CANCEL;
+                appBar: AppBar(
+                  title: const Text('WebView em Nova Página'),
+                ),
+                body: WebViewWidget(
+                  controller: WebViewController()
+                    ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                    ..setNavigationDelegate(
+                      NavigationDelegate(
+                        onNavigationRequest: (NavigationRequest request) {
+                          if (request.url != url) {
+                            return NavigationDecision.prevent;
                           }
-                          return NavigationActionPolicy.ALLOW;
+                          return NavigationDecision.navigate;
                         },
                       ),
+                    )
+                    ..loadRequest(Uri.parse(url)),
+                ),
               ),
             ),
           );
@@ -177,37 +360,21 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             builder: (context) => AlertDialog(
               content: SizedBox(
                 height: 400,
-                child: viewType == 'webview_flutter'
-                    ? WebViewWidget(
-                        controller: WebViewController()
-                          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                          ..setNavigationDelegate(
-                            NavigationDelegate(
-                              onNavigationRequest: (NavigationRequest request) {
-                                if (request.url != url) {
-                                  return NavigationDecision.prevent;
-                                }
-                                return NavigationDecision.navigate;
-                              },
-                            ),
-                          )
-                          ..loadRequest(Uri.parse(url)),
-                      )
-                    : InAppWebView(
-                        initialUrlRequest: URLRequest(url: WebUri(url)),
-                        initialSettings: InAppWebViewSettings(
-                          javaScriptEnabled: true,
-                        ),
-                        onWebViewCreated: (controller) {
-                          _inAppWebViewController = controller;
-                        },
-                        shouldOverrideUrlLoading: (controller, request) async {
-                          if (request.request.url.toString() != url) {
-                            return NavigationActionPolicy.CANCEL;
+                child: WebViewWidget(
+                  controller: WebViewController()
+                    ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                    ..setNavigationDelegate(
+                      NavigationDelegate(
+                        onNavigationRequest: (NavigationRequest request) {
+                          if (request.url != url) {
+                            return NavigationDecision.prevent;
                           }
-                          return NavigationActionPolicy.ALLOW;
+                          return NavigationDecision.navigate;
                         },
                       ),
+                    )
+                    ..loadRequest(Uri.parse(url)),
+                ),
               ),
             ),
           );
@@ -222,7 +389,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
                 double dialogWidth = MediaQuery.of(context).size.width * 0.8;
 
                 return Dialog(
-                  insetPadding: EdgeInsets.all(10),
+                  insetPadding: const EdgeInsets.all(10),
                   backgroundColor: Colors.white,
                   child: Container(
                     height: dialogHeight,
@@ -233,40 +400,21 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
                     ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: viewType == 'webview_flutter'
-                          ? WebViewWidget(
-                              controller: WebViewController()
-                                ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                                ..setNavigationDelegate(
-                                  NavigationDelegate(
-                                    onNavigationRequest:
-                                        (NavigationRequest request) {
-                                      if (request.url != url) {
-                                        return NavigationDecision.prevent;
-                                      }
-                                      return NavigationDecision.navigate;
-                                    },
-                                  ),
-                                )
-                                ..loadRequest(Uri.parse(url)),
-                            )
-                          : InAppWebView(
-                              initialUrlRequest: URLRequest(url: WebUri(url)),
-                              initialSettings: InAppWebViewSettings(
-                                javaScriptEnabled: true,
-                                supportZoom: true,
-                              ),
-                              onWebViewCreated: (controller) {
-                                _inAppWebViewController = controller;
-                              },
-                              shouldOverrideUrlLoading:
-                                  (controller, request) async {
-                                if (request.request.url.toString() != url) {
-                                  return NavigationActionPolicy.CANCEL;
+                      child: WebViewWidget(
+                        controller: WebViewController()
+                          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                          ..setNavigationDelegate(
+                            NavigationDelegate(
+                              onNavigationRequest: (NavigationRequest request) {
+                                if (request.url != url) {
+                                  return NavigationDecision.prevent;
                                 }
-                                return NavigationActionPolicy.ALLOW;
+                                return NavigationDecision.navigate;
                               },
                             ),
+                          )
+                          ..loadRequest(Uri.parse(url)),
+                      ),
                     ),
                   ),
                 );
@@ -286,64 +434,14 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           }
           break;
         case 'F':
-          if (viewType == 'webview_flutter') {
-            // Carrega a URL no controlador existente da WebView
-            _webViewController.loadRequest(Uri.parse(url));
-          } else {
-            // Carrega a URL no controlador existente do InAppWebView
-            _inAppWebViewController.loadUrl(
-              urlRequest: URLRequest(url: WebUri(url)),
-            );
-          }
+          // Carrega a URL no controlador existente da WebView
+          _webViewController.loadRequest(Uri.parse(url));
+
           // Atualiza o estado para exibir o conteúdo em tela cheia
           setState(() {
             showFrame = true;
           });
           break;
-        /* Abrir o WebView ocupando toda a página
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => Scaffold(
-                appBar: AppBar(
-                  title: const Text('WebView Fullscreen'),
-                ),
-                body: viewType == 'webview_flutter'
-                    ? WebViewWidget(
-                        controller: WebViewController()
-                          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                          ..setNavigationDelegate(
-                            NavigationDelegate(
-                              onNavigationRequest: (NavigationRequest request) {
-                                if (request.url != url) {
-                                  return NavigationDecision.prevent;
-                                }
-                                return NavigationDecision.navigate;
-                              },
-                            ),
-                          )
-                          ..loadRequest(Uri.parse(url)),
-                      )
-                    : InAppWebView(
-                        initialUrlRequest: URLRequest(url: WebUri(url)),
-                        initialSettings: InAppWebViewSettings(
-                          javaScriptEnabled: true,
-                        ),
-                        onWebViewCreated: (controller) {
-                          _inAppWebViewController = controller;
-                        },
-                        shouldOverrideUrlLoading: (controller, request) async {
-                          if (request.request.url.toString() != url) {
-                            return NavigationActionPolicy.CANCEL;
-                          }
-                          return NavigationActionPolicy.ALLOW;
-                        },
-                      ),
-              ),
-            ),
-          );
-          break;
-          */
       }
     }
   }
@@ -359,7 +457,6 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   }
 
   @override
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -371,38 +468,6 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           key: _formKey,
           child: Column(
             children: [
-              Column(
-                children: [
-                  Row(
-                    children: [
-                      Radio(
-                        value: 'webview_flutter',
-                        groupValue: viewType,
-                        onChanged: (value) {
-                          setState(() {
-                            viewType = value!;
-                          });
-                        },
-                      ),
-                      const Text('webview_flutter'),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      Radio(
-                        value: 'flutter_inappwebview',
-                        groupValue: viewType,
-                        onChanged: (value) {
-                          setState(() {
-                            viewType = value!;
-                          });
-                        },
-                      ),
-                      const Text('flutter_inappwebview'),
-                    ],
-                  ),
-                ],
-              ),
               TextFormField(
                 controller: _urlController,
                 decoration: InputDecoration(
@@ -433,48 +498,60 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
                 }).toList(),
               ),
               const SizedBox(height: 16.0),
-              ElevatedButton(
-                onPressed: () async {
-                  if (_formKey.currentState!.validate()) {
-                    bool permissionsGranted = await _checkPermissions();
-                    if (!permissionsGranted) {
-                      return;
-                    }
-
-                    _openUrl();
-                  }
-                },
-                child: const Text('Executar'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton(
+                    onPressed: () async {
+                      if (_formKey.currentState!.validate()) {
+                        bool permissionsGranted = await _checkPermissions();
+                        if (permissionsGranted) {
+                          _openUrl();
+                        }
+                      }
+                    },
+                    child: const Text('Executar'),
+                  ),
+                  ElevatedButton(
+                    onPressed: _scanQRCodeOrTakePicture,
+                    child: const Icon(Icons.camera_alt),
+                  ),
+                ],
               ),
               if (showFrame && _urlController.text.isNotEmpty)
                 Expanded(
-                  child: viewType == 'webview_flutter'
-                      ? WebViewWidget(
-                          controller: _webViewController,
-                        )
-                      : InAppWebView(
-                          initialUrlRequest: URLRequest(
-                            url: WebUri(_urlController.text),
-                          ),
-                          initialSettings: InAppWebViewSettings(
-                            javaScriptEnabled: true,
-                          ),
-                          onWebViewCreated: (controller) {
-                            _inAppWebViewController = controller;
-                          },
-                          shouldOverrideUrlLoading:
-                              (controller, request) async {
-                            if (request.request.url.toString() !=
-                                _urlController.text) {
-                              return NavigationActionPolicy.CANCEL;
-                            }
-                            return NavigationActionPolicy.ALLOW;
-                          },
-                        ),
+                  child: WebViewWidget(
+                    controller: _webViewController,
+                  ),
                 ),
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class QRViewExample extends StatelessWidget {
+  final Function(String) onCodeScanned;
+
+  const QRViewExample({required this.onCodeScanned, Key? key})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Escanear QR Code'),
+      ),
+      body: MobileScanner(
+        onDetect: (barcode) {
+          if (barcode.barcodes.isNotEmpty) {
+            final String code = barcode.barcodes.first.rawValue!;
+            onCodeScanned(code);
+            Navigator.pop(context);
+          }
+        },
       ),
     );
   }

@@ -1,6 +1,6 @@
 name: flutter_webview_demo
 description: "A new Flutter project."
-publish_to: 'none'
+publish_to: "none"
 version: 0.1.0
 
 environment:
@@ -10,10 +10,15 @@ dependencies:
   flutter:
     sdk: flutter
   webview_flutter: ^4.10.0
+  webview_flutter_android: ^4.2.0
+  webview_flutter_wkwebview: ^3.18.4
   permission_handler: ^10.2.0
-  flutter_inappwebview: ^6.1.5
   url_launcher: ^6.0.20
-  
+  mobile_scanner: 6.0.7
+  image_picker: ^1.0.7
+  sentry_flutter: ^8.0.0
+  http: ^1.2.0
+  path_provider: ^2.1.0
 
 dev_dependencies:
   flutter_test:
