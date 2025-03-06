@@ -14,14 +14,15 @@ import 'dart:convert';
 import 'dart:async';
 
 // URL para enviar dados
-const String apiUrl = 'https://seu-servidor-aqui.com/api/upload';
+const String apiUrl = 'http://192.168.31.194:3000/api/upload';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await SentryFlutter.init(
     (options) {
-      options.dsn = 'SUA_DSN_DO_SENTRY_AQUI';
+      options.dsn =
+          'https://5573f26d70d7e90910b448932b8d0626@o4508931864330240.ingest.us.sentry.io/4508931871866880';
       options.tracesSampleRate = 1.0; // Capture 100% dos traces
     },
     appRunner: () => runApp(const MyApp()),
@@ -65,8 +66,20 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _requestPermissions();
-    _initializeWebView();
+
+    // Solicita permissões primeiro
+    _requestPermissions().then((_) {
+      // Inicializa o WebView após obter permissões
+      _initializeWebView();
+
+      // Carrega a página inicial após um pequeno atraso para garantir que tudo está pronto
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          // Carrega uma página HTML inicial simples
+          _loadHtmlContent();
+        }
+      });
+    });
   }
 
   void _initializeWebView() {
@@ -112,14 +125,16 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           },
           onPageFinished: (String url) {
             debugPrint('Navegação finalizada: $url');
+            // Verifica se o WebView está realmente pronto
+            controller.runJavaScript(
+                'document.body.style.backgroundColor = "white";');
           },
           onWebResourceError: (WebResourceError error) {
             _logError('WebView error: ${error.description}');
           },
           onNavigationRequest: (NavigationRequest request) {
-            if (request.url != _urlController.text) {
-              return NavigationDecision.prevent;
-            }
+            // Remove a restrição de navegação que pode estar causando problemas
+            // Quando um QR code é escaneado, queremos permitir a navegação para essa URL
             return NavigationDecision.navigate;
           },
         ),
@@ -136,18 +151,50 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       })
       // Define configurações para persistência
       ..enableZoom(true)
-      ..setBackgroundColor(Colors.white)
+      ..setBackgroundColor(Colors.white) // Garante fundo branco
       ..setUserAgent('Mozilla/5.0 Flutter WebView')
       // Habilita armazenamento local (localStorage) e cookies
       ..setJavaScriptMode(JavaScriptMode.unrestricted);
 
-    // Configurar cookies via JavaScript
+    // Injetar um script para monitorar eventos relacionados a problemas de renderização
     controller.runJavaScript('''
+      // Configurar detecção de problemas de renderização
+      document.addEventListener('DOMContentLoaded', function() {
+        console.log('DOM carregado completamente');
+        document.body.style.backgroundColor = 'white';
+      });
+      
+      // Monitorar erros de renderização
+      window.addEventListener('error', function(e) {
+        console.error('Erro de renderização:', e.message);
+        window.Flutter.postMessage('Erro: ' + e.message);
+      });
+      
+      // Configurar cookies via JavaScript
       document.cookie = "session_persistent=true; domain=.example.com; path=/; expires=${DateTime.now().add(const Duration(days: 365)).toUtc()}";
       localStorage.setItem('app_initialized', 'true');
       ''');
 
     _webViewController = controller;
+
+    // Carregue uma página em branco para inicializar o WebView
+    _webViewController.loadHtmlString('''
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { background-color: white; color: black; font-family: Arial, sans-serif; }
+          </style>
+        </head>
+        <body>
+          <div style="padding: 20px; text-align: center;">
+            <h3>WebView inicializado</h3>
+            <p>Insira uma URL ou escaneie um código QR para começar.</p>
+          </div>
+        </body>
+      </html>
+    ''');
   }
 
   void _logError(String message) {
@@ -242,21 +289,56 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
               // Registrar URL escaneada
               await _sendQrData(code);
 
-              // Carregar URL na WebView
-              await _webViewController.loadRequest(Uri.parse(code));
+              // Carregar URL na WebView - Garante que a WebView seja completamente recarregada
+              await _loadUrlSafely(code);
+
+              // Assegura que o estado está atualizado após a detecção do QR
+              if (mounted) {
+                setState(() {
+                  showFrame = true;
+                });
+              }
             },
             onPhotoTaken: (String imagePath) async {
               // Fechar modal quando foto for tirada
               Navigator.pop(context);
 
-              // Processar a foto
-              await _uploadFile(imagePath, 'image');
+              try {
+                // Processar a foto
+                await _uploadFile(imagePath, 'image');
 
-              // Informar a WebView sobre a imagem usando JavaScript
-              final String base64Image =
-                  base64Encode(await File(imagePath).readAsBytes());
-              await _webViewController.runJavaScript(
-                  'window.dispatchEvent(new CustomEvent("imageSelected", {detail: "data:image/jpeg;base64,$base64Image"}));');
+                // Garantir que o WebView esteja visível
+                if (mounted) {
+                  setState(() {
+                    showFrame = true;
+                    // Carregar uma página em branco para garantir que o WebView esteja ativo
+                    _loadHtmlContent();
+                  });
+                }
+
+                // Pequeno atraso para permitir que o WebView seja inicializado
+                await Future.delayed(const Duration(milliseconds: 500));
+
+                // Informar a WebView sobre a imagem usando JavaScript
+                final String base64Image =
+                    base64Encode(await File(imagePath).readAsBytes());
+
+                // Injeta JavaScript com pequeno atraso para garantir que a WebView esteja pronta
+                await _webViewController.runJavaScript(
+                    'window.dispatchEvent(new CustomEvent("imageSelected", {detail: "data:image/jpeg;base64,$base64Image"}));');
+
+                // Para debug - Verifica se a WebView está respondendo
+                await _webViewController.runJavaScript(
+                    'console.log("WebView recebeu imagem com tamanho: " + "${base64Image.length}");');
+
+                // Força uma atualização visual
+                if (mounted) {
+                  setState(() {});
+                }
+              } catch (e) {
+                _logError('Erro ao processar imagem: $e');
+                _showError('Erro ao processar imagem: $e');
+              }
             },
           ),
         ),
@@ -265,6 +347,96 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       await Sentry.captureException(e, stackTrace: stackTrace);
       _showError('Erro ao tirar foto ou escanear QR Code: $e');
     }
+  }
+
+  // Função auxiliar para carregar URLs com segurança
+  Future<void> _loadUrlSafely(String url) async {
+    try {
+      await _webViewController.loadRequest(Uri.parse(url));
+
+      // Verificar se a página carregou corretamente depois de um curto intervalo
+      await Future.delayed(const Duration(seconds: 1));
+      await _webViewController.runJavaScript('''
+        if (document.body) {
+          document.body.style.backgroundColor = "white";
+          console.log("Página carregada e cor de fundo definida");
+        } else {
+          console.error("Corpo do documento não encontrado");
+        }
+      ''');
+    } catch (e) {
+      _logError('Erro ao carregar URL: $e');
+
+      // Tenta recarregar a página em caso de erro
+      try {
+        await _webViewController.reload();
+      } catch (reloadError) {
+        _logError('Erro ao tentar recarregar: $reloadError');
+      }
+    }
+  }
+
+  // Carrega HTML base para garantir que o WebView está funcionando
+  void _loadHtmlContent() {
+    _webViewController.loadHtmlString('''
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { 
+              background-color: white; 
+              color: black; 
+              font-family: Arial, sans-serif; 
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              height: 100vh;
+              margin: 0;
+            }
+            .container {
+              text-align: center;
+              padding: 20px;
+            }
+          </style>
+          <script>
+            // Escutar evento de imagem selecionada
+            window.addEventListener('imageSelected', function(e) {
+              console.log('Evento imageSelected recebido');
+              const imageData = e.detail;
+              displayImage(imageData);
+            });
+            
+            function displayImage(imageData) {
+              // Cria container para imagem
+              const container = document.querySelector('.container');
+              if (!container) return;
+              
+              // Limpa conteúdo atual
+              container.innerHTML = '';
+              
+              // Cria elemento de imagem
+              const img = document.createElement('img');
+              img.src = imageData;
+              img.style.maxWidth = '100%';
+              img.style.borderRadius = '8px';
+              img.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
+              
+              // Adiciona imagem ao container
+              container.appendChild(img);
+              
+              console.log('Imagem exibida no DOM');
+            }
+          </script>
+        </head>
+        <body>
+          <div class="container">
+            <h3>Imagem sendo processada...</h3>
+            <p>Aguarde um momento.</p>
+          </div>
+        </body>
+      </html>
+    ''');
   }
 
   // Função para enviar dados do QR Code para o servidor
@@ -520,8 +692,36 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
               ),
               if (showFrame && _urlController.text.isNotEmpty)
                 Expanded(
-                  child: WebViewWidget(
-                    controller: _webViewController,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Stack(
+                      children: [
+                        // WebView renderizado
+                        WebViewWidget(
+                          controller: _webViewController,
+                        ),
+                        // Indicador de carregamento simples
+                        FutureBuilder<bool>(
+                          future: Future.delayed(
+                              const Duration(milliseconds: 500), () => true),
+                          builder: (context, snapshot) {
+                            if (!snapshot.hasData) {
+                              return Container(
+                                color: Colors.white.withOpacity(0.7),
+                                child: const Center(
+                                  child: CircularProgressIndicator(),
+                                ),
+                              );
+                            }
+                            return const SizedBox.shrink();
+                          },
+                        ),
+                      ],
+                    ),
                   ),
                 ),
             ],

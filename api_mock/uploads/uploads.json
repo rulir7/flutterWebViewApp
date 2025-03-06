@@ -1,0 +1,20 @@
+[
+  {
+    "timestamp": "2025-03-06T17:50:07.512Z",
+    "filename": "1741283407238-405919417.jpg",
+    "originalName": "image_1741283407577.jpg",
+    "size": 2937685,
+    "type": "image",
+    "mimetype": "application/octet-stream",
+    "path": "C:\\Users\\rulir\\OneDrive\\Documentos\\PROGRAMACAO\\Flutter\\Gabriel\\flutter_webview_demo\\api_mock\\uploads\\1741283407238-405919417.jpg"
+  },
+  {
+    "timestamp": "2025-03-06T17:50:34.936Z",
+    "filename": "1741283434785-63466769.jpg",
+    "originalName": "image_1741283435158.jpg",
+    "size": 1391716,
+    "type": "image",
+    "mimetype": "application/octet-stream",
+    "path": "C:\\Users\\rulir\\OneDrive\\Documentos\\PROGRAMACAO\\Flutter\\Gabriel\\flutter_webview_demo\\api_mock\\uploads\\1741283434785-63466769.jpg"
+  }
+]
