@@ -643,14 +643,30 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   // Função para processar uma imagem selecionada
   Future<void> _processSelectedImage(String imagePath, String inputId) async {
     try {
-      // Upload da imagem para o servidor
-      await _uploadFile(imagePath, 'image');
-
       // Converter para base64
       final String base64Image =
           base64Encode(await File(imagePath).readAsBytes());
 
-      // Injetar de volta ao elemento de input do formulário
+      // Tentar detectar QR code na imagem de forma transparente
+      String? qrCode;
+      try {
+        final MobileScannerController controller = MobileScannerController();
+        final barcodes = await controller.analyzeImage(imagePath);
+        if (barcodes?.barcodes.isNotEmpty ?? false) {
+          qrCode = barcodes?.barcodes.first.rawValue;
+        }
+        await controller.dispose();
+      } catch (e) {
+        debugPrint('Erro ao tentar detectar QR code: $e');
+      }
+
+      // Preparar objeto de dados no formato especificado
+      final Map<String, String> resultData = {
+        'image': 'base64:$base64Image',
+        if (qrCode != null) 'qrcode': qrCode,
+      };
+
+      // Injetar dados de volta ao elemento de input do formulário
       await _webViewController.runJavaScript('''
         (function() {
           // Encontrar o elemento de input
@@ -685,20 +701,32 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           const event = new Event('change', { bubbles: true });
           input.dispatchEvent(event);
           
-          console.log('Arquivo injetado no input:', input);
+          // Disparar evento customizado com os dados completos
+          const customEvent = new CustomEvent('imageProcessed', { 
+            detail: ${jsonEncode(resultData)}
+          });
+          document.dispatchEvent(customEvent);
           
-          // Também enviar dados do QR code, se disponível
-          if (window.lastDetectedQRCode) {
-            // Pode ser usado um campo oculto ou um evento customizado
-            const event = new CustomEvent('qrCodeDetected', { 
-              detail: { qrcode: window.lastDetectedQRCode }
-            });
-            document.dispatchEvent(event);
-          }
+          // Também disponibilizar os dados como variável global para o PWA acessar
+          window.processedImageData = ${jsonEncode(resultData)};
+          
+          console.log('Arquivo processado e injetado:', ${jsonEncode(resultData)});
         })();
       ''');
 
-      debugPrint('Imagem processada e injetada no input: $inputId');
+      // Enviar dados para o servidor no formato correto
+      final uri = Uri.parse(apiUrl);
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(resultData),
+      );
+
+      if (response.statusCode == 200) {
+        debugPrint('Dados enviados com sucesso');
+      } else {
+        _logError('Erro ao enviar dados: ${response.statusCode}');
+      }
     } catch (e, stackTrace) {
       await Sentry.captureException(e, stackTrace: stackTrace);
       _showError('Erro ao processar imagem: $e');
@@ -711,7 +739,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       if (!hasPermission) return;
 
       // Abre um modal customizado com câmera que permite escanear QR code ou tirar foto
-      showModalBottomSheet(
+      final result = await showModalBottomSheet<Map<String, dynamic>>(
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
@@ -725,91 +753,101 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             ),
           ),
           child: CameraWithQRScanner(
-            onQRCodeDetected: (String code) async {
-              // Fechar modal quando QR code for detectado
-              Navigator.pop(context);
-
-              // Processar o código QR
-              setState(() {
-                _urlController.text = code;
-                showFrame = true;
-              });
-
-              // Registrar URL escaneada
-              await _sendQrData(code);
-
-              // Se foi chamado de um input file, injetar os dados no elemento
-              if (inputId.isNotEmpty) {
-                // Salvar QR code detectado no JavaScript para uso posterior
-                await _webViewController.runJavaScript('''
-                  window.lastDetectedQRCode = "$code";
-                  
-                  // Disparar evento para notificar o PWA
-                  document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
-                    detail: { qrcode: "$code" }
-                  }));
-                ''');
-              } else {
-                // Carregar URL na WebView - Garante que a WebView seja completamente recarregada
-                await _loadUrlSafely(code);
-
-                // Assegura que o estado está atualizado após a detecção do QR
-                if (mounted) {
-                  setState(() {
-                    showFrame = true;
-                  });
-                }
-              }
+            onQRCodeDetected: (String code) {
+              // Retornar resultado em vez de fechar o modal diretamente
+              Navigator.pop(context, {'type': 'qrcode', 'data': code});
             },
-            onPhotoTaken: (String imagePath) async {
-              // Fechar modal quando foto for tirada
-              Navigator.pop(context);
-
-              try {
-                // Se foi chamado de um input file, enviar para o elemento
-                if (inputId.isNotEmpty) {
-                  await _processSelectedImage(imagePath, inputId);
-                } else {
-                  // Processar a foto
-                  await _uploadFile(imagePath, 'image');
-
-                  // Garantir que o WebView esteja visível
-                  if (mounted) {
-                    setState(() {
-                      showFrame = true;
-                      // Carregar uma página em branco para garantir que o WebView esteja ativo
-                      _loadHtmlContent();
-                    });
-                  }
-
-                  // Pequeno atraso para permitir que o WebView seja inicializado
-                  await Future.delayed(const Duration(milliseconds: 500));
-
-                  // Informar a WebView sobre a imagem usando JavaScript
-                  final String base64Image =
-                      base64Encode(await File(imagePath).readAsBytes());
-
-                  // Injeta JavaScript com pequeno atraso para garantir que a WebView esteja pronta
-                  await _webViewController.runJavaScript(
-                      'window.dispatchEvent(new CustomEvent("imageSelected", {detail: "data:image/jpeg;base64,$base64Image"}));');
-
-                  // Para debug - Verifica se a WebView está respondendo
-                  await _webViewController.runJavaScript(
-                      'console.log("WebView recebeu imagem com tamanho: " + "${base64Image.length}");');
-
-                  // Força uma atualização visual
-                  if (mounted) {
-                    setState(() {});
-                  }
-                }
-              } catch (e) {
-                _logError('Erro ao processar imagem: $e');
-                _showError('Erro ao processar imagem: $e');
-              }
+            onPhotoTaken: (String imagePath) {
+              // Retornar resultado em vez de fechar o modal diretamente
+              Navigator.pop(context, {'type': 'photo', 'data': imagePath});
             },
           ),
         ),
       );
+
+      // Se não houver resultado, o usuário cancelou
+      if (result == null) return;
+
+      // Processar o resultado após o modal ser fechado
+      if (result['type'] == 'qrcode') {
+        final String code = result['data'];
+
+        // Processar o código QR
+        setState(() {
+          _urlController.text = code;
+          showFrame = true;
+        });
+
+        // Registrar URL escaneada
+        await _sendQrData(code);
+
+        // Se foi chamado de um input file, injetar os dados no elemento
+        if (inputId.isNotEmpty) {
+          // Salvar QR code detectado no JavaScript para uso posterior
+          await _webViewController.runJavaScript('''
+            window.lastDetectedQRCode = "$code";
+            
+            // Disparar evento para notificar o PWA
+            document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
+              detail: { qrcode: "$code" }
+            }));
+          ''');
+        } else {
+          // Carregar URL na WebView - Garante que a WebView seja completamente recarregada
+          await _loadUrlSafely(code);
+
+          // Assegura que o estado está atualizado após a detecção do QR
+          if (mounted) {
+            setState(() {
+              showFrame = true;
+            });
+          }
+        }
+      } else if (result['type'] == 'photo') {
+        final String imagePath = result['data'];
+
+        try {
+          // Se foi chamado de um input file, enviar para o elemento
+          if (inputId.isNotEmpty) {
+            await _processSelectedImage(imagePath, inputId);
+          } else {
+            // Processar a foto
+            await _uploadFile(imagePath, 'image');
+
+            // Garantir que o WebView esteja visível
+            if (mounted) {
+              setState(() {
+                showFrame = true;
+                // Carregar uma página em branco para garantir que o WebView esteja ativo
+                _loadHtmlContent();
+              });
+            }
+
+            // Pequeno atraso para permitir que o WebView seja inicializado
+            await Future.delayed(const Duration(milliseconds: 500));
+
+            // Informar a WebView sobre a imagem usando JavaScript
+            final String base64Image =
+                base64Encode(await File(imagePath).readAsBytes());
+
+            // Injeta JavaScript com pequeno atraso para garantir que a WebView esteja pronta
+            await _webViewController.runJavaScript(
+                'window.dispatchEvent(new CustomEvent("imageSelected", {detail: "data:image/jpeg;base64,$base64Image"}));');
+
+            // Para debug - Verifica se a WebView está respondendo
+            await _webViewController.runJavaScript(
+                'console.log("WebView recebeu imagem com tamanho: " + "${base64Image.length}");');
+
+            // Força uma atualização visual
+            if (mounted) {
+              setState(() {});
+            }
+          }
+        } catch (e) {
+          _logError('Erro ao processar imagem: $e');
+          _showError('Erro ao processar imagem: $e');
+        }
+      }
     } catch (e, stackTrace) {
       await Sentry.captureException(e, stackTrace: stackTrace);
       _showError('Erro ao tirar foto ou escanear QR Code: $e');
@@ -927,20 +965,48 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   }
 
   // Função para enviar arquivos para o servidor
-  Future<void> _uploadFile(String filePath, String type) async {
+  Future<void> _uploadFile(String filePath, String type,
+      {String? qrCode}) async {
     try {
       final uri = Uri.parse(apiUrl);
-      final request = http.MultipartRequest('POST', uri);
 
-      request.files.add(await http.MultipartFile.fromPath('file', filePath));
-      request.fields['type'] = type;
+      // Se for uma imagem com QR code, enviar como um único objeto JSON
+      if (type == 'image' && qrCode != null) {
+        // Criar objeto no formato especificado
+        final Map<String, dynamic> data = {
+          'type': 'combined_data',
+          'qrcode': qrCode,
+          'image': 'base64:${base64Encode(await File(filePath).readAsBytes())}'
+        };
 
-      final response = await request.send();
+        // Enviar como JSON
+        final response = await http.post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(data),
+        );
 
-      if (response.statusCode == 200) {
-        debugPrint('Arquivo enviado com sucesso');
+        if (response.statusCode == 200) {
+          debugPrint('Dados combinados enviados com sucesso');
+        } else {
+          _logError('Erro ao enviar dados combinados: ${response.statusCode}');
+        }
       } else {
-        _logError('Erro ao enviar arquivo: ${response.statusCode}');
+        // Método original para outros tipos de upload
+        final request = http.MultipartRequest('POST', uri);
+        request.files.add(await http.MultipartFile.fromPath('file', filePath));
+        request.fields['type'] = type;
+        if (qrCode != null) {
+          request.fields['qrcode'] = qrCode;
+        }
+
+        final response = await request.send();
+
+        if (response.statusCode == 200) {
+          debugPrint('Arquivo enviado com sucesso');
+        } else {
+          _logError('Erro ao enviar arquivo: ${response.statusCode}');
+        }
       }
     } catch (e, stackTrace) {
       await Sentry.captureException(e, stackTrace: stackTrace);
