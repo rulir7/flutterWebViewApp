@@ -29,7 +29,13 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage: storage });
+// Configuração do multer com limite de tamanho aumentado
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB de limite
+  },
+});
 
 // Rota para verificar se o servidor está online
 app.get("/", (req, res) => {
@@ -39,6 +45,7 @@ app.get("/", (req, res) => {
 // Endpoint unificado para receber uploads de arquivos ou dados QR
 app.post("/api/upload", upload.single("file"), (req, res) => {
   console.log("Corpo da requisição:", req.body);
+  console.log("Arquivo recebido:", req.file);
 
   // Verificar se é um upload de QR code (sem arquivo)
   if (req.body.type === "qr_code" && req.body.data && !req.file) {
@@ -72,6 +79,7 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
   if (req.file) {
     console.log("Arquivo recebido:", req.file);
     console.log("Tipo de upload:", req.body.type);
+    console.log("QR Code associado:", req.body.qrcode || "Nenhum");
 
     // Criar um registro do upload
     const logEntry = {
@@ -83,6 +91,31 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
       mimetype: req.file.mimetype,
       path: req.file.path,
     };
+
+    // Se houver um QR code associado, incluir no log
+    if (req.body.qrcode) {
+      logEntry.qrcode = req.body.qrcode;
+
+      // Também registrar no log de QR codes
+      const qrLogPath = path.join(uploadDir, "qr_codes.json");
+      let qrLogs = [];
+
+      if (fs.existsSync(qrLogPath)) {
+        try {
+          qrLogs = JSON.parse(fs.readFileSync(qrLogPath));
+        } catch (e) {
+          console.error("Erro ao ler arquivo de logs de QR:", e);
+        }
+      }
+
+      qrLogs.push({
+        timestamp: new Date().toISOString(),
+        data: req.body.qrcode,
+        imageFilename: req.file.filename,
+      });
+
+      fs.writeFileSync(qrLogPath, JSON.stringify(qrLogs, null, 2));
+    }
 
     // Salvar um registro de upload
     const logPath = path.join(uploadDir, "uploads.json");
@@ -101,22 +134,23 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Arquivo recebido com sucesso",
+      message:
+        "Arquivo recebido com sucesso" +
+        (req.body.qrcode ? " com QR code associado" : ""),
       file: {
         filename: req.file.filename,
         size: req.file.size,
         path: `/uploads/${req.file.filename}`,
       },
+      qrcode: req.body.qrcode || null,
     });
   }
 
   // Se não for nenhum dos casos acima
-  return res
-    .status(400)
-    .json({
-      success: false,
-      message: "Requisição inválida. Nenhum dado reconhecido.",
-    });
+  return res.status(400).json({
+    success: false,
+    message: "Requisição inválida. Nenhum dado reconhecido.",
+  });
 });
 
 // Rota para interface web básica para ver uploads

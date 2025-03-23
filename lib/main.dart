@@ -1432,12 +1432,32 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           break;
         case 'E':
           // Abrir em um navegador externo
-          if (await canLaunchUrl(Uri.parse(url))) {
-            await launchUrl(Uri.parse(url));
-          } else {
+          try {
+            final Uri uri = Uri.parse(_urlController.text);
+
+            if (!await launchUrl(
+              uri,
+              mode: LaunchMode.externalApplication,
+            )) {
+              debugPrint('🚫 Erro ao abrir URL: ${uri.toString()}');
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                      'Não foi possível abrir o navegador externo. URL: ${uri.toString()}'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            } else {
+              debugPrint('✅ URL aberta com sucesso: ${uri.toString()}');
+            }
+          } catch (e) {
+            debugPrint('⚠️ Exceção ao abrir URL: $e');
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                  content: Text('Não foi possível abrir o navegador externo.')),
+              SnackBar(
+                content: Text(
+                    'Erro ao abrir URL: ${e.toString().substring(0, e.toString().length > 100 ? 100 : e.toString().length)}'),
+                backgroundColor: Colors.red,
+              ),
             );
           }
           break;
@@ -1489,14 +1509,21 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           key: _formKey,
           child: Column(
             children: [
+              // Campo de URL modificado para ser apenas de leitura
               TextFormField(
                 controller: _urlController,
                 decoration: InputDecoration(
-                  labelText: 'URL',
+                  labelText: 'URL (somente via QR code)',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8.0),
                   ),
+                  suffixIcon: const Icon(Icons.qr_code),
+                  hintText: 'Escaneie um QR code para inserir a URL',
+                  helperText:
+                      'Este campo é preenchido automaticamente ao escanear um QR code',
                 ),
+                readOnly: true, // Impede digitação direta
+                enabled: false, // Desativa o campo visualmente
                 validator: _validateUrl,
               ),
               const SizedBox(height: 16.0),
@@ -1522,23 +1549,52 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
+                  // Botão Executar (só fica habilitado quando houver URL)
                   ElevatedButton(
-                    onPressed: () async {
-                      if (_formKey.currentState!.validate()) {
-                        bool permissionsGranted = await _checkPermissions();
-                        if (permissionsGranted) {
-                          _openUrl();
-                        }
-                      }
-                    },
+                    onPressed: _urlController.text.isEmpty
+                        ? null // Desabilitado quando não há URL
+                        : () async {
+                            if (_formKey.currentState!.validate()) {
+                              bool permissionsGranted =
+                                  await _checkPermissions();
+                              if (permissionsGranted) {
+                                _openUrl();
+                              }
+                            }
+                          },
                     child: const Text('Executar'),
                   ),
-                  ElevatedButton(
+                  // Botão da câmera com texto explicativo
+                  ElevatedButton.icon(
                     onPressed: _scanQRCodeOrTakePicture,
-                    child: const Icon(Icons.camera_alt),
+                    icon: const Icon(Icons.camera_alt),
+                    label: const Text('Escanear QR'),
                   ),
                 ],
               ),
+              // Texto explicativo na UI
+              if (_urlController.text.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 24),
+                  child: Column(
+                    children: [
+                      const Icon(Icons.info_outline,
+                          size: 40, color: Colors.blue),
+                      const SizedBox(height: 12),
+                      const Text(
+                        "Use o botão 'Escanear QR' para capturar um código QR",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        "A URL será preenchida automaticamente e você poderá abri-la usando o botão 'Executar'",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ),
               if (showFrame && _urlController.text.isNotEmpty)
                 Expanded(
                   child: Container(
