@@ -8,16 +8,34 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import './camera-qr-scanner-widget.dart'; // Import the CameraWithQRScanner widget
 import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
+import 'package:flutter/services.dart';
 
 // URL para enviar dados
 const String apiUrl = 'http://192.168.31.194:3000/api/upload';
 
+// Contador global para monitorar receptores
+bool _receiverResetRequired = false;
+int _cameraAttemptCount = 0;
+DateTime? _lastCameraReset;
+
+// Chaves para SharedPreferences
+const String _keyReceiverResetRequired = 'receiver_reset_required';
+const String _keyLastCameraReset = 'last_camera_reset';
+const String _keyCameraAttemptCount = 'camera_attempt_count';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Carregar estado persistido
+  await _loadPersistedState();
+
+  // Verificar e limpar receivers do sistema em excesso
+  await _checkAndCleanupReceivers();
 
   await SentryFlutter.init(
     (options) {
@@ -27,6 +45,172 @@ Future<void> main() async {
     },
     appRunner: () => runApp(const MyApp()),
   );
+}
+
+// Função para carregar estados persistidos
+Future<void> _loadPersistedState() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Carregar flag de reset necessário
+    _receiverResetRequired = prefs.getBool(_keyReceiverResetRequired) ?? false;
+
+    // Carregar contagem de tentativas
+    _cameraAttemptCount = prefs.getInt(_keyCameraAttemptCount) ?? 0;
+
+    // Carregar último reset (como string e converter para DateTime)
+    final lastResetStr = prefs.getString(_keyLastCameraReset);
+    if (lastResetStr != null) {
+      try {
+        _lastCameraReset = DateTime.parse(lastResetStr);
+      } catch (e) {
+        debugPrint('⚠️ Erro ao parsear data do último reset: $e');
+      }
+    }
+
+    // Se já passou muito tempo desde o último reset (mais de 1 hora),
+    // podemos resetar o estado para permitir novas tentativas
+    if (_lastCameraReset != null) {
+      final timeSinceReset = DateTime.now().difference(_lastCameraReset!);
+      if (timeSinceReset.inHours > 1) {
+        _receiverResetRequired = false;
+        _cameraAttemptCount = 0;
+        _lastCameraReset = null;
+
+        // Salvar este estado limpo
+        await _savePersistedState();
+      }
+    }
+
+    debugPrint(
+        '📱 Estado carregado: Reset necessário: $_receiverResetRequired, '
+        'Tentativas: $_cameraAttemptCount, Último reset: $_lastCameraReset');
+  } catch (e) {
+    debugPrint('⚠️ Erro ao carregar estado persistido: $e');
+  }
+}
+
+// Função para salvar estados de erro
+Future<void> _savePersistedState() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Salvar flag de reset necessário
+    await prefs.setBool(_keyReceiverResetRequired, _receiverResetRequired);
+
+    // Salvar contagem de tentativas
+    await prefs.setInt(_keyCameraAttemptCount, _cameraAttemptCount);
+
+    // Salvar data do último reset (se existir)
+    if (_lastCameraReset != null) {
+      await prefs.setString(
+          _keyLastCameraReset, _lastCameraReset!.toIso8601String());
+    } else {
+      await prefs.remove(_keyLastCameraReset);
+    }
+
+    debugPrint('📱 Estado salvo: Reset necessário: $_receiverResetRequired, '
+        'Tentativas: $_cameraAttemptCount, Último reset: $_lastCameraReset');
+  } catch (e) {
+    debugPrint('⚠️ Erro ao salvar estado persistido: $e');
+  }
+}
+
+// Função para verificar e limpar receivers do sistema
+Future<void> _checkAndCleanupReceivers() async {
+  try {
+    // Tentar abrir e fechar uma câmera simples para detectar e corrigir problemas de receivers
+    if (Platform.isAndroid) {
+      debugPrint('📱 Verificando e limpando receivers do sistema...');
+
+      // Forçar liberação de recursos do sistema
+      try {
+        await SystemChannels.platform
+            .invokeMethod<void>('SystemNavigator.routeUpdated');
+        // Pequena pausa para dar tempo ao sistema
+        await Future.delayed(const Duration(milliseconds: 500));
+      } catch (e) {
+        debugPrint('⚠️ Erro ao tentar liberar recursos do sistema: $e');
+      }
+    }
+  } catch (e) {
+    debugPrint('⚠️ Erro ao verificar receivers: $e');
+  }
+}
+
+// Verificar se é seguro abrir a câmera
+Future<bool> _isSafeToOpenCamera() async {
+  // Se não for Android, sempre retorna verdadeiro
+  if (!Platform.isAndroid) return true;
+
+  // Se já precisamos de reset, não é seguro
+  if (_receiverResetRequired) {
+    debugPrint('🚫 Câmera bloqueada: Reset do aplicativo necessário');
+    return false;
+  }
+
+  // Se tentou abrir a câmera muitas vezes em sequência
+  if (_cameraAttemptCount >= 3) {
+    debugPrint('⚠️ Muitas tentativas de abrir a câmera: $_cameraAttemptCount');
+
+    // Mas se já faz tempo desde o último reset, podemos tentar novamente
+    if (_lastCameraReset != null &&
+        DateTime.now().difference(_lastCameraReset!).inMinutes >= 5) {
+      _cameraAttemptCount = 0;
+      await _savePersistedState();
+      debugPrint('✅ Tempo suficiente passado, permitindo nova tentativa');
+      return true;
+    }
+
+    debugPrint('🚫 Bloqueando acesso à câmera por muitas tentativas recentes');
+    return false;
+  }
+
+  // Incrementar contador de tentativas e salvar
+  _cameraAttemptCount++;
+  await _savePersistedState();
+
+  // Limpar memória do sistema
+  try {
+    debugPrint('🧹 Limpando memória do sistema antes de usar a câmera');
+
+    // Forçar coleta de lixo via SystemChannels
+    await SystemChannels.platform
+        .invokeMethod<void>('SystemNavigator.routeUpdated');
+
+    // Pequeno delay para dar tempo à limpeza
+    await Future.delayed(const Duration(milliseconds: 200));
+  } catch (e) {
+    debugPrint('⚠️ Erro ao limpar memória: $e');
+  }
+
+  return true;
+}
+
+// Marcar que é necessário reiniciar o app
+void _markReceiverResetRequired() {
+  _receiverResetRequired = true;
+  _lastCameraReset = DateTime.now();
+
+  // Incrementar contador de tentativas
+  _cameraAttemptCount++;
+
+  // Persistir o estado para manter mesmo após reiniciar o app
+  _savePersistedState();
+
+  // Registrar no Sentry
+  Sentry.captureMessage(
+    'Aplicativo marcado para reinicialização devido a Too many receivers',
+    level: SentryLevel.warning,
+  );
+
+  // Armazenar o estado no armazenamento local do WebView também
+  try {
+    // Injetar um script para armazenar no localStorage
+    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+  } catch (e) {
+    debugPrint('⚠️ Erro ao esconder teclado: $e');
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -40,8 +224,69 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: const WebViewDemo(),
+      home: _receiverResetRequired
+          ? const AppResetRequiredScreen()
+          : const WebViewDemo(),
       navigatorObservers: [SentryNavigatorObserver()],
+    );
+  }
+}
+
+// Tela para solicitar que o usuário reinicie o aplicativo
+class AppResetRequiredScreen extends StatelessWidget {
+  const AppResetRequiredScreen({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.restart_alt,
+                color: Colors.red,
+                size: 80,
+              ),
+              const SizedBox(height: 32),
+              const Text(
+                'Reinicialização Necessária',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'O aplicativo precisa ser reiniciado para continuar funcionando corretamente. '
+                'Por favor, feche completamente o aplicativo e abra-o novamente.',
+                style: TextStyle(fontSize: 16),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 40),
+              ElevatedButton.icon(
+                onPressed: () {
+                  SystemNavigator.pop(); // Tenta fechar o aplicativo
+                },
+                icon: const Icon(Icons.exit_to_app),
+                label: const Text('Fechar Aplicativo'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -62,6 +307,17 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
 
   late final WebViewController _webViewController;
   Timer? _healthCheckTimer;
+
+  // Key para o Scaffold para acessar o contexto
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  // Estado do app
+  bool _isLoading = true;
+  bool _hasConnectionError = false;
+  bool _isOffline = false;
+  int _healthCheckFailCount = 0;
+  int _maxFailedHealthChecks = 3;
+  DateTime? _lastReload;
 
   @override
   void initState() {
@@ -643,24 +899,39 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   // Função para processar uma imagem selecionada
   Future<void> _processSelectedImage(String imagePath, String inputId) async {
     try {
+      debugPrint('Processando imagem: $imagePath');
+
+      // Verificar se o arquivo existe
+      final file = File(imagePath);
+      if (!await file.exists()) {
+        debugPrint('Arquivo de imagem não existe: $imagePath');
+        throw Exception('Arquivo de imagem não encontrado');
+      }
+
       // Converter para base64
-      final String base64Image =
-          base64Encode(await File(imagePath).readAsBytes());
+      final String base64Image = base64Encode(await file.readAsBytes());
 
       // Tentar detectar QR code na imagem de forma transparente
       String? qrCode;
       try {
         final MobileScannerController controller = MobileScannerController();
-        final barcodes = await controller.analyzeImage(imagePath);
-        if (barcodes?.barcodes.isNotEmpty ?? false) {
-          qrCode = barcodes?.barcodes.first.rawValue;
+        try {
+          final barcodes = await controller.analyzeImage(imagePath);
+          if (barcodes?.barcodes.isNotEmpty ?? false) {
+            qrCode = barcodes?.barcodes.first.rawValue;
+            debugPrint('QR code detectado na imagem: $qrCode');
+          }
+        } finally {
+          // Garantir que o controller seja liberado mesmo se houver erro
+          await controller.dispose();
         }
-        await controller.dispose();
       } catch (e) {
         debugPrint('Erro ao tentar detectar QR code: $e');
+        // Continuar mesmo se falhar a detecção do QR code
       }
 
       // Preparar objeto de dados no formato especificado
+      // Sempre incluir a imagem no formato base64
       final Map<String, String> resultData = {
         'image': 'base64:$base64Image',
         if (qrCode != null) 'qrcode': qrCode,
@@ -714,18 +985,20 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         })();
       ''');
 
-      // Enviar dados para o servidor no formato correto
-      final uri = Uri.parse(apiUrl);
-      final response = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(resultData),
-      );
-
-      if (response.statusCode == 200) {
-        debugPrint('Dados enviados com sucesso');
-      } else {
-        _logError('Erro ao enviar dados: ${response.statusCode}');
+      // Enviar dados para o servidor usando multipart com tratamento de erros reforçado
+      try {
+        await _uploadFile(imagePath, 'image', qrCode: qrCode);
+      } catch (uploadError, uploadStack) {
+        debugPrint('Erro ao enviar arquivo para o servidor: $uploadError');
+        await Sentry.captureException(
+          uploadError,
+          stackTrace: uploadStack,
+          hint: {'info': 'Erro ao fazer upload após processamento de imagem'}
+              as Hint,
+        );
+        // Não reenviar exceção para não interromper o fluxo do usuário
+        _showError(
+            'O arquivo foi processado, mas houve um erro no envio ao servidor: $uploadError');
       }
     } catch (e, stackTrace) {
       await Sentry.captureException(e, stackTrace: stackTrace);
@@ -771,6 +1044,8 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       // Processar o resultado após o modal ser fechado
       if (result['type'] == 'qrcode') {
         final String code = result['data'];
+        final String? imagePath = result['imagePath']
+            as String?; // Verificar se temos uma imagem junto com o QR code
 
         // Processar o código QR
         setState(() {
@@ -778,8 +1053,21 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           showFrame = true;
         });
 
-        // Registrar URL escaneada
-        await _sendQrData(code);
+        // Se temos uma imagem junto com o QR code, processar a imagem e o QR code
+        if (imagePath != null) {
+          // Processar a imagem com o QR code
+          if (inputId.isNotEmpty) {
+            // Se foi chamado de um input file, enviar para o elemento
+            await _processSelectedImage(imagePath, inputId);
+          } else {
+            // Processar a foto e o QR code juntos
+            await _uploadFile(imagePath, 'image', qrCode: code);
+          }
+        } else {
+          // Apenas o QR code foi detectado (sem imagem)
+          // Registrar URL escaneada
+          await _sendQrData(code);
+        }
 
         // Se foi chamado de um input file, injetar os dados no elemento
         if (inputId.isNotEmpty) {
@@ -805,14 +1093,16 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         }
       } else if (result['type'] == 'photo') {
         final String imagePath = result['data'];
+        final String? qrCode = result['qrCode']
+            as String?; // Verificar se temos um QR code detectado na foto
 
         try {
           // Se foi chamado de um input file, enviar para o elemento
           if (inputId.isNotEmpty) {
             await _processSelectedImage(imagePath, inputId);
           } else {
-            // Processar a foto
-            await _uploadFile(imagePath, 'image');
+            // Processar a foto, incluindo QR code se detectado
+            await _uploadFile(imagePath, 'image', qrCode: qrCode);
 
             // Garantir que o WebView esteja visível
             if (mounted) {
@@ -837,6 +1127,19 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             // Para debug - Verifica se a WebView está respondendo
             await _webViewController.runJavaScript(
                 'console.log("WebView recebeu imagem com tamanho: " + "${base64Image.length}");');
+
+            // Se detectou um QR code, também notificar sobre ele
+            if (qrCode != null) {
+              await _webViewController.runJavaScript('''
+                // Disparar evento para notificar o PWA sobre o QR code detectado na imagem
+                document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
+                  detail: { qrcode: "$qrCode" }
+                }));
+                
+                // Também disponibilizar o QR code como variável global
+                window.lastDetectedQRCode = "$qrCode";
+              ''');
+            }
 
             // Força uma atualização visual
             if (mounted) {
@@ -968,49 +1271,39 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   Future<void> _uploadFile(String filePath, String type,
       {String? qrCode}) async {
     try {
+      debugPrint(
+          'Enviando arquivo: $filePath | Tipo: $type | QR Code: $qrCode');
       final uri = Uri.parse(apiUrl);
 
-      // Se for uma imagem com QR code, enviar como um único objeto JSON
-      if (type == 'image' && qrCode != null) {
-        // Criar objeto no formato especificado
-        final Map<String, dynamic> data = {
-          'type': 'combined_data',
-          'qrcode': qrCode,
-          'image': 'base64:${base64Encode(await File(filePath).readAsBytes())}'
-        };
+      // Criar um request multipart
+      final request = http.MultipartRequest('POST', uri);
 
-        // Enviar como JSON
-        final response = await http.post(
-          uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode(data),
-        );
+      // Adicionar o arquivo como um arquivo multipart
+      request.files.add(await http.MultipartFile.fromPath('file', filePath));
 
-        if (response.statusCode == 200) {
-          debugPrint('Dados combinados enviados com sucesso');
-        } else {
-          _logError('Erro ao enviar dados combinados: ${response.statusCode}');
-        }
+      // Adicionar outros campos
+      request.fields['type'] = type;
+
+      // Se houver QR code, adicionar como campo separado
+      if (qrCode != null) {
+        request.fields['qrcode'] = qrCode;
+        debugPrint('Enviando QR code junto com a imagem: $qrCode');
+      }
+
+      // Enviar o request e obter a resposta
+      final streamedResponse = await request.send();
+      final responseBody = await streamedResponse.stream.bytesToString();
+
+      if (streamedResponse.statusCode == 200) {
+        debugPrint(
+            'Arquivo enviado com sucesso! ${qrCode != null ? "Com QR code" : "Sem QR code"}');
       } else {
-        // Método original para outros tipos de upload
-        final request = http.MultipartRequest('POST', uri);
-        request.files.add(await http.MultipartFile.fromPath('file', filePath));
-        request.fields['type'] = type;
-        if (qrCode != null) {
-          request.fields['qrcode'] = qrCode;
-        }
-
-        final response = await request.send();
-
-        if (response.statusCode == 200) {
-          debugPrint('Arquivo enviado com sucesso');
-        } else {
-          _logError('Erro ao enviar arquivo: ${response.statusCode}');
-        }
+        _logError('Erro ao enviar arquivo: ${streamedResponse.statusCode}');
+        _logError('Resposta: $responseBody');
       }
     } catch (e, stackTrace) {
-      await Sentry.captureException(e, stackTrace: stackTrace);
       _logError('Exceção ao enviar arquivo: $e');
+      await Sentry.captureException(e, stackTrace: stackTrace);
     }
   }
 
@@ -1174,8 +1467,21 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
       appBar: AppBar(
         title: const Text('Flutter WebView Demo'),
+        actions: [
+          // Botão para forçar reload
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _reloadWebView(),
+          ),
+          // Botão para tirar foto
+          IconButton(
+            icon: const Icon(Icons.camera_alt),
+            onPressed: () => _showCameraModal(),
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -1454,6 +1760,403 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         timer.cancel();
       }
     });
+  }
+
+  // Função para mostrar a câmera
+  Future<void> _showCameraModal() async {
+    try {
+      // Verificar primeiro se temos permissão
+      final PermissionStatus cameraPermissionStatus =
+          await Permission.camera.request();
+
+      if (!cameraPermissionStatus.isGranted) {
+        _logError('Permissão de câmera negada pelo usuário');
+        _showError(
+            'É necessário permitir o acesso à câmera para usar esta função.');
+        return;
+      }
+
+      // Verificar se é seguro abrir a câmera
+      bool isSafeToOpenCamera = await _checkIfSafeToProceedWithCamera();
+      if (!isSafeToOpenCamera) {
+        // A mensagem de erro já é mostrada no método _checkIfSafeToProceedWithCamera
+        return;
+      }
+
+      // Limpar recursos e estado antes de abrir a câmera
+      await _disposeResourcesBeforeCamera();
+
+      // Pequeno atraso para garantir limpeza de recursos
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Se muitos receptores foram registrados, mostrar erro e não abrir câmera
+      if (_receiverResetRequired) {
+        _showError(
+            'O aplicativo precisa ser reiniciado para usar a câmera. Por favor, feche completamente o aplicativo e abra-o novamente.');
+        return;
+      }
+
+      final result = await showModalBottomSheet<Map<String, dynamic>>(
+        context: _scaffoldKey.currentContext!,
+        isScrollControlled: true,
+        isDismissible: true,
+        backgroundColor: Colors.transparent,
+        builder: (BuildContext context) {
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.9,
+            decoration: const BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
+            ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
+              child: CameraWithQRScanner(
+                onQRCodeDetected: (String qrCode) {
+                  debugPrint('QR code detectado: $qrCode');
+                  Navigator.pop(context, {'type': 'qrcode', 'data': qrCode});
+                },
+                onPhotoTaken: (String imagePath) {
+                  debugPrint('Foto tirada: $imagePath');
+                  Navigator.pop(context, {'type': 'photo', 'data': imagePath});
+                },
+              ),
+            ),
+          );
+        },
+      );
+
+      // Restaurar WebView e recursos após fechar a câmera
+      await _restoreResourcesAfterCamera();
+
+      // Controle de erro - se não conseguiu abrir a câmera
+      if (result == null) {
+        // Verificar por erro de Too many receivers
+        final cameraErrorOccurred =
+            await _webViewController.runJavaScriptReturningResult('''
+          (function() {
+            return localStorage.getItem('camera_error_count') > '2';
+          })();
+        ''');
+
+        if (cameraErrorOccurred.toString() == 'true') {
+          _markReceiverResetRequired();
+        }
+        return;
+      }
+
+      final String type = result['type'];
+      final String data = result['data'];
+
+      debugPrint('Resultado recebido: tipo=$type, data=$data');
+
+      if (type == 'qrcode') {
+        // Processar QR code detectado
+        await _processQRCode(data);
+
+        // Se o QR veio com uma imagem, processar a imagem também
+        if (result.containsKey('imagePath')) {
+          await _processSelectedImage(result['imagePath'], 'camera_file_input');
+        }
+      } else if (type == 'photo') {
+        // Processar foto tirada
+        await _processSelectedImage(data, 'camera_file_input');
+      }
+    } catch (e, stackTrace) {
+      _logError('Erro ao mostrar câmera: $e');
+
+      // Verificar se o erro está relacionado a Too many receivers
+      if (e.toString().contains('receivers')) {
+        _markReceiverResetRequired();
+        _showError(
+            'O aplicativo atingiu o limite de recursos. Por favor, reinicie o aplicativo.');
+      } else {
+        await Sentry.captureException(e, stackTrace: stackTrace);
+        _showError('Não foi possível acessar a câmera: $e');
+      }
+    }
+  }
+
+  // Novo método para verificar se é seguro abrir a câmera (Android)
+  Future<bool> _checkIfSafeToProceedWithCamera() async {
+    try {
+      // Verificar usando a função global
+      final isSafe = await _isSafeToOpenCamera();
+      if (!isSafe) {
+        // Se não for seguro, verificar se precisa reiniciar
+        if (_receiverResetRequired) {
+          _showError(
+              'O aplicativo precisa ser reiniciado para usar a câmera. Por favor, feche e abra o aplicativo novamente.');
+        } else {
+          _showError(
+              'Muitas tentativas de acessar a câmera. Aguarde alguns minutos e tente novamente.');
+        }
+        return false;
+      }
+
+      // Verificar se houve erros de câmera armazenados
+      final hasPreviousCameraError =
+          await _webViewController.runJavaScriptReturningResult('''
+        (function() {
+          // Verificar se houve erros de câmera armazenados
+          const cameraErrorCount = localStorage.getItem('camera_error_count') || '0';
+          const lastCameraError = localStorage.getItem('last_camera_error_time');
+          const now = Date.now();
+          
+          // Se houve erro recente (nos últimos 5 minutos)
+          if (lastCameraError && (now - parseInt(lastCameraError)) < 300000) {
+            const count = parseInt(cameraErrorCount);
+            // Se tivemos mais de 3 erros consecutivos, sugerir reiniciar o app
+            if (count > 3) {
+              return true; // Não é seguro abrir a câmera
+            }
+          } else if (lastCameraError) {
+            // Se o último erro foi há mais de 5 minutos, resetar o contador
+            localStorage.setItem('camera_error_count', '0');
+          }
+          
+          return false; // É seguro abrir a câmera
+        })();
+      ''');
+
+      final bool shouldAvoid = hasPreviousCameraError.toString() == 'true';
+
+      if (shouldAvoid) {
+        _logError(
+            'Detectado excesso de erros de câmera, evitando abrir câmera');
+        _markReceiverResetRequired(); // Marcar que precisa reiniciar
+        return false;
+      }
+
+      return true;
+    } catch (e) {
+      debugPrint('Erro ao verificar segurança da câmera: $e');
+      // Em caso de erro na verificação, permitir o uso da câmera
+      return true;
+    }
+  }
+
+  // Novo método para limpar memória antes de usar a câmera
+  Future<void> _clearMemoryBeforeCameraUse() async {
+    try {
+      debugPrint('🧹 Limpando memória do sistema antes de usar a câmera');
+
+      // Forçar coleta de lixo via SystemChannels
+      await SystemChannels.platform
+          .invokeMethod<void>('SystemNavigator.routeUpdated');
+
+      // Pequeno delay para dar tempo à limpeza
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Se estamos no Android, tentar abordagens adicionais
+      if (Platform.isAndroid) {
+        try {
+          // Solicitar minimização e restauração rápida para liberar recursos
+          await SystemChannels.platform
+              .invokeMethod<void>('SystemNavigator.handlePopRoute');
+          await Future.delayed(const Duration(milliseconds: 100));
+        } catch (e) {
+          debugPrint('⚠️ Erro ao tentar minimizar app: $e');
+        }
+      }
+
+      debugPrint('✅ Limpeza de memória concluída');
+    } catch (e) {
+      debugPrint('⚠️ Erro ao limpar memória: $e');
+    }
+  }
+
+  // Processa QR code detectado
+  Future<void> _processQRCode(String qrData) async {
+    try {
+      debugPrint('Processando QR code: $qrData');
+
+      // Enviar para o servidor
+      final uri = Uri.parse(apiUrl);
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'type': 'qr_code',
+          'data': qrData,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        debugPrint('QR code enviado com sucesso para o servidor');
+      } else {
+        _logError('Erro ao enviar QR code: ${response.statusCode}');
+      }
+
+      // Enviar o QR code para o WebView
+      await _webViewController.runJavaScript('''
+        (function() {
+          // Disparar evento com dados do QR code
+          const event = new CustomEvent('qrCodeScanned', {
+            detail: {
+              data: '$qrData'
+            }
+          });
+          document.dispatchEvent(event);
+          
+          // Também disponibilizar como variável global
+          window.lastScannedQRCode = '$qrData';
+          
+          console.log('QR code processado e enviado para o WebView: $qrData');
+        })();
+      ''');
+    } catch (e, stackTrace) {
+      _logError('Erro ao processar QR code: $e');
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _showError('Erro ao processar QR code: $e');
+    }
+  }
+
+  // Restaura recursos após fechar a câmera
+  Future<void> _restoreResourcesAfterCamera() async {
+    try {
+      // Pequeno atraso para garantir que a câmera foi fechada completamente
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      if (_webViewController != null) {
+        debugPrint('Restaurando WebView após uso da câmera');
+
+        // Recarregar completamente a WebView para garantir liberação de todos os receptores
+        await _webViewController.reload();
+
+        // Ou injetar JavaScript para retomar mídias se necessário
+        await _webViewController.runJavaScript('''
+          (function() {
+            console.log('WebView restaurado após uso da câmera');
+          })();
+        ''');
+      }
+    } catch (e) {
+      debugPrint('Erro ao restaurar recursos após câmera: $e');
+    }
+  }
+
+  // Força o reload do WebView
+  Future<void> _reloadWebView() async {
+    setState(() {
+      _isLoading = true;
+    });
+    try {
+      await _webViewController.reload();
+      _lastReload = DateTime.now();
+      _healthCheckFailCount = 0;
+      setState(() {
+        _hasConnectionError = false;
+        _isOffline = false;
+      });
+    } catch (e, stackTrace) {
+      _logError('Erro ao recarregar WebView: $e');
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      setState(() {
+        _hasConnectionError = true;
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  // Libera recursos antes de abrir a câmera para evitar conflitos
+  Future<void> _disposeResourcesBeforeCamera() async {
+    try {
+      // Pausar o WebView para evitar conflitos com a câmera
+      if (_webViewController != null) {
+        debugPrint('Pausando WebView temporariamente');
+        // Injetar JavaScript para pausar mídias e liberar recursos
+        await _webViewController.runJavaScript('''
+          (function() {
+            try {
+              // Pausar todos os vídeos
+              document.querySelectorAll('video').forEach(function(video) {
+                if (!video.paused) video.pause();
+              });
+              
+              // Pausar todos os áudios
+              document.querySelectorAll('audio').forEach(function(audio) {
+                if (!audio.paused) audio.pause();
+              });
+              
+              // Pausar elementos com API de mídia que possam estar usando a câmera
+              try {
+                if (window._mediaStreamTracks) {
+                  window._mediaStreamTracks.forEach(function(track) {
+                    track.stop();
+                  });
+                }
+                
+                // Limpar qualquer receptor de eventos que possa estar em uso
+                if (window._eventListeners) {
+                  window._eventListeners.forEach(function(listener) {
+                    if (listener.element && listener.type && listener.handler) {
+                      listener.element.removeEventListener(listener.type, listener.handler);
+                    }
+                  });
+                  window._eventListeners = [];
+                }
+                
+                // Forçar coleta de lixo nos navegadores que suportam
+                if (window.gc) {
+                  window.gc();
+                }
+              } catch(e) {
+                console.error("Erro ao parar media tracks:", e);
+              }
+              
+              console.log('Recursos da web pausados temporariamente');
+            } catch(e) {
+              console.error('Erro ao liberar recursos web:', e);
+            }
+          })();
+        ''');
+      }
+
+      // Pequena pausa para garantir que recursos sejam liberados
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Usar a nova função de limpeza de memória
+      await _clearMemoryBeforeCameraUse();
+    } catch (e) {
+      debugPrint('Erro ao liberar recursos antes da câmera: $e');
+    }
+  }
+
+  // Registrar erro de câmera para controle
+  Future<void> _registerCameraError(String errorMessage) async {
+    try {
+      await _webViewController.runJavaScript('''
+        (function() {
+          const currentCount = parseInt(localStorage.getItem('camera_error_count') || '0');
+          localStorage.setItem('camera_error_count', (currentCount + 1).toString());
+          localStorage.setItem('last_camera_error_time', Date.now().toString());
+          localStorage.setItem('last_camera_error', "${errorMessage.replaceAll('"', '\\"')}");
+          console.error('Erro de câmera registrado: ${errorMessage.replaceAll('"', '\\"')}');
+        })();
+      ''');
+
+      // Depois de vários erros, marcar que precisa reiniciar
+      final errorCount = int.tryParse(await _webViewController
+              .runJavaScriptReturningResult(
+                  'localStorage.getItem("camera_error_count") || "0"')
+              .then((value) => value.toString())) ??
+          0;
+
+      if (errorCount > 3) {
+        _markReceiverResetRequired();
+      }
+    } catch (e) {
+      debugPrint('Erro ao registrar erro de câmera: $e');
+    }
   }
 }
 
