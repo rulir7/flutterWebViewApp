@@ -16,7 +16,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 // URL para enviar dados
-const String apiUrl = 'http://192.168.31.194:3000/api/upload';
+const String apiUrl = 'http://rulir.ddns.net:3003/api/upload';
 
 // Contador global para monitorar receptores
 bool _receiverResetRequired = false;
@@ -2212,6 +2212,25 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       }
     } catch (e) {
       debugPrint('Erro ao registrar erro de câmera: $e');
+    }
+  }
+
+  Future<bool> _testApiConnection() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://seu-dominio-ddns.com:3000/api/test'),
+      );
+
+      if (response.statusCode == 200) {
+        debugPrint('API está online: ${response.body}');
+        return true;
+      } else {
+        debugPrint('API retornou erro: ${response.statusCode}');
+        return false;
+      }
+    } catch (e) {
+      debugPrint('Erro ao conectar na API: $e');
+      return false;
     }
   }
 }
