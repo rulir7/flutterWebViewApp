@@ -9,7 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import './camera-qr-scanner-widget.dart'; // Import the CameraWithQRScanner widget
+import './camera-qr-scanner-widget.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
@@ -41,7 +41,7 @@ Future<void> main() async {
     (options) {
       options.dsn =
           'https://5573f26d70d7e90910b448932b8d0626@o4508931864330240.ingest.us.sentry.io/4508931871866880';
-      options.tracesSampleRate = 1.0; // Capture 100% dos traces
+      options.tracesSampleRate = 1.0;
     },
     appRunner: () => runApp(const MyApp()),
   );
@@ -138,6 +138,19 @@ Future<void> _checkAndCleanupReceivers() async {
   }
 }
 
+// Função para resetar o estado da câmera
+Future<void> _resetCameraState() async {
+  try {
+    _cameraAttemptCount = 0;
+    _lastCameraReset = null;
+    _receiverResetRequired = false;
+    await _savePersistedState();
+    debugPrint('✅ Estado da câmera resetado com sucesso');
+  } catch (e) {
+    debugPrint('⚠️ Erro ao resetar estado da câmera: $e');
+  }
+}
+
 // Verificar se é seguro abrir a câmera
 Future<bool> _isSafeToOpenCamera() async {
   // Se não for Android, sempre retorna verdadeiro
@@ -150,15 +163,13 @@ Future<bool> _isSafeToOpenCamera() async {
   }
 
   // Se tentou abrir a câmera muitas vezes em sequência
-  if (_cameraAttemptCount >= 3) {
+  if (_cameraAttemptCount >= 5) {
     debugPrint('⚠️ Muitas tentativas de abrir a câmera: $_cameraAttemptCount');
 
-    // Mas se já faz tempo desde o último reset, podemos tentar novamente
+    // Se já passou 2 minutos desde o último reset, resetamos o contador
     if (_lastCameraReset != null &&
-        DateTime.now().difference(_lastCameraReset!).inMinutes >= 5) {
-      _cameraAttemptCount = 0;
-      await _savePersistedState();
-      debugPrint('✅ Tempo suficiente passado, permitindo nova tentativa');
+        DateTime.now().difference(_lastCameraReset!).inMinutes >= 2) {
+      await _resetCameraState();
       return true;
     }
 
@@ -173,12 +184,8 @@ Future<bool> _isSafeToOpenCamera() async {
   // Limpar memória do sistema
   try {
     debugPrint('🧹 Limpando memória do sistema antes de usar a câmera');
-
-    // Forçar coleta de lixo via SystemChannels
     await SystemChannels.platform
         .invokeMethod<void>('SystemNavigator.routeUpdated');
-
-    // Pequeno delay para dar tempo à limpeza
     await Future.delayed(const Duration(milliseconds: 200));
   } catch (e) {
     debugPrint('⚠️ Erro ao limpar memória: $e');
@@ -219,9 +226,13 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter WebView Demo',
+      title: 'Bemall Promoções',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blue,
+          primary: Colors.blue,
+          secondary: Colors.blue,
+        ),
         useMaterial3: true,
       ),
       home: _receiverResetRequired
@@ -301,41 +312,30 @@ class WebViewDemo extends StatefulWidget {
 class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _urlController = TextEditingController();
-
-  String option = 'A';
   bool showFrame = false;
-
   late final WebViewController _webViewController;
   Timer? _healthCheckTimer;
-
-  // Key para o Scaffold para acessar o contexto
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-
-  // Estado do app
   bool _isLoading = true;
   bool _hasConnectionError = false;
   bool _isOffline = false;
   int _healthCheckFailCount = 0;
   int _maxFailedHealthChecks = 3;
   DateTime? _lastReload;
+  bool _isOrientationShown = true;
+  bool _isProcessCompleted = false;
+  File? _capturedImage;
+  bool _isShowingImageCapture = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
-    // Solicita permissões primeiro
     _requestPermissions().then((_) {
-      // Inicializa o WebView após obter permissões
       _initializeWebView();
-
-      // Carrega a página inicial após um pequeno atraso para garantir que tudo está pronto
       Future.delayed(const Duration(milliseconds: 500), () {
         if (mounted) {
-          // Carrega uma página HTML inicial simples
           _loadHtmlContent();
-
-          // Configura verificação periódica de saúde
           _startPeriodicHealthCheck();
         }
       });
@@ -559,42 +559,16 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         <head>
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <style>
-            body { background-color: white; color: black; font-family: Arial, sans-serif; }
-          </style>
-          <script>
-            // Escutar evento de imagem selecionada
-            window.addEventListener('imageSelected', function(e) {
-              console.log('Evento imageSelected recebido');
-              const imageData = e.detail;
-              displayImage(imageData);
-            });
-            
-            function displayImage(imageData) {
-              // Cria container para imagem
-              const container = document.querySelector('.container');
-              if (!container) return;
-              
-              // Limpa conteúdo atual
-              container.innerHTML = '';
-              
-              // Cria elemento de imagem
-              const img = document.createElement('img');
-              img.src = imageData;
-              img.style.maxWidth = '100%';
-              img.style.borderRadius = '8px';
-              img.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-              
-              // Adiciona imagem ao container
-              container.appendChild(img);
-              
-              console.log('Imagem exibida no DOM');
+            body { 
+              background-color: white; 
+              color: black; 
+              font-family: Arial, sans-serif; 
             }
-          </script>
+          </style>
         </head>
         <body>
-          <div style="padding: 20px; text-align: center;">
-            <h3>WebView inicializado</h3>
-            <p>Insira uma URL ou escaneie um código QR para começar.</p>
+          <div style="padding: 20px;">
+            <h3>Escaneie um código QR para começar</h3>
           </div>
         </body>
       </html>
@@ -909,7 +883,8 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       }
 
       // Converter para base64
-      final String base64Image = base64Encode(await file.readAsBytes());
+      final List<int> imageBytes = await file.readAsBytes();
+      final String base64Image = base64Encode(imageBytes);
 
       // Tentar detectar QR code na imagem de forma transparente
       String? qrCode;
@@ -919,84 +894,142 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           final barcodes = await controller.analyzeImage(imagePath);
           if (barcodes?.barcodes.isNotEmpty ?? false) {
             qrCode = barcodes?.barcodes.first.rawValue;
-            debugPrint('QR code detectado na imagem: $qrCode');
+            debugPrint('✅ QR code detectado na imagem: $qrCode');
+          } else {
+            debugPrint('ℹ️ Nenhum QR code detectado na imagem');
           }
         } finally {
-          // Garantir que o controller seja liberado mesmo se houver erro
           await controller.dispose();
         }
       } catch (e) {
-        debugPrint('Erro ao tentar detectar QR code: $e');
-        // Continuar mesmo se falhar a detecção do QR code
+        debugPrint('⚠️ Erro ao tentar detectar QR code: $e');
       }
 
-      // Preparar objeto de dados no formato especificado
-      // Sempre incluir a imagem no formato base64
-      final Map<String, String> resultData = {
-        'image': 'base64:$base64Image',
-        if (qrCode != null) 'qrcode': qrCode,
-      };
-
-      // Injetar dados de volta ao elemento de input do formulário
-      await _webViewController.runJavaScript('''
-        (function() {
-          // Encontrar o elemento de input
-          const input = document.getElementById('$inputId') || document.querySelector('input[type="file"]');
-          if (!input) {
-            console.error('Input element not found: $inputId');
-            return;
-          }
-          
-          // Criar um objeto File a partir do base64
-          const byteString = atob('$base64Image');
-          const mimeType = 'image/jpeg';
-          const ab = new ArrayBuffer(byteString.length);
-          const ia = new Uint8Array(ab);
-          
-          for (let i = 0; i < byteString.length; i++) {
-            ia[i] = byteString.charCodeAt(i);
-          }
-          
-          const blob = new Blob([ab], {type: mimeType});
-          const fileName = 'image_${DateTime.now().millisecondsSinceEpoch}.jpg';
-          const file = new File([blob], fileName, {type: mimeType});
-          
-          // Criar um objeto DataTransfer
-          const dataTransfer = new DataTransfer();
-          dataTransfer.items.add(file);
-          
-          // Definir os arquivos do input
-          input.files = dataTransfer.files;
-          
-          // Disparar evento change para notificar o formulário
-          const event = new Event('change', { bubbles: true });
-          input.dispatchEvent(event);
-          
-          // Disparar evento customizado com os dados completos
-          const customEvent = new CustomEvent('imageProcessed', { 
-            detail: ${jsonEncode(resultData)}
-          });
-          document.dispatchEvent(customEvent);
-          
-          // Também disponibilizar os dados como variável global para o PWA acessar
-          window.processedImageData = ${jsonEncode(resultData)};
-          
-          console.log('Arquivo processado e injetado:', ${jsonEncode(resultData)});
-        })();
+      // Sempre mostrar a imagem capturada em uma página HTML
+      await _webViewController.loadHtmlString('''
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+              body { 
+                margin: 0; 
+                padding: 20px;
+                background-color: white;
+                font-family: Arial, sans-serif;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+              }
+              .preview-container {
+                width: 100%;
+                max-width: 400px;
+                margin: 0 auto;
+                text-align: center;
+              }
+              .preview-image {
+                width: 100%;
+                max-height: 300px;
+                object-fit: contain;
+                border-radius: 8px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+              }
+              h3 {
+                color: #333;
+                margin-bottom: 20px;
+              }
+              .qr-info {
+                margin-top: 20px;
+                padding: 15px;
+                background-color: #e3f2fd;
+                border-radius: 8px;
+                border-left: 4px solid #2196F3;
+                display: ${qrCode != null ? 'block' : 'none'};
+              }
+            </style>
+          </head>
+          <body>
+            <div class="preview-container">
+              <h3>Foto Capturada</h3>
+              <img src="data:image/jpeg;base64,$base64Image" class="preview-image" alt="Preview">
+              <div class="qr-info">
+                <h4>QR Code detectado:</h4>
+                <p>${qrCode ?? ''}</p>
+              </div>
+            </div>
+            <script>
+              // Se tiver QR code com URL, redirecionar após 1 segundo
+              ${qrCode != null && (qrCode.startsWith('http://') || qrCode.startsWith('https://')) ? '''
+                setTimeout(function() {
+                  window.location.href = "$qrCode";
+                }, 1000);
+              ''' : ''}
+            </script>
+          </body>
+        </html>
       ''');
 
-      // Enviar dados para o servidor usando multipart com tratamento de erros reforçado
+      // Se foi detectado um QR code com URL, carregar a URL no WebView após mostrar a prévia
+      if (qrCode != null &&
+          (qrCode.startsWith('http://') || qrCode.startsWith('https://'))) {
+        await Future.delayed(const Duration(seconds: 1));
+        await _loadUrlSafely(qrCode);
+      }
+
+      // Se foi chamado de um input file, processar para o elemento
+      if (inputId.isNotEmpty) {
+        await _webViewController.runJavaScript('''
+          (function() {
+            try {
+              const input = document.getElementById('$inputId') || document.querySelector('input[type="file"]');
+              if (!input) {
+                console.error('Input element not found: $inputId');
+                return;
+              }
+              
+              const byteString = atob('$base64Image');
+              const mimeType = 'image/jpeg';
+              const ab = new ArrayBuffer(byteString.length);
+              const ia = new Uint8Array(ab);
+              
+              for (let i = 0; i < byteString.length; i++) {
+                ia[i] = byteString.charCodeAt(i);
+              }
+              
+              const blob = new Blob([ab], {type: mimeType});
+              const fileName = 'image_${DateTime.now().millisecondsSinceEpoch}.jpg';
+              const file = new File([blob], fileName, {type: mimeType});
+              
+              const dataTransfer = new DataTransfer();
+              dataTransfer.items.add(file);
+              input.files = dataTransfer.files;
+              
+              const event = new Event('change', { bubbles: true });
+              input.dispatchEvent(event);
+              
+              if ('$qrCode' !== 'null') {
+                document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
+                  detail: { qrcode: '$qrCode' }
+                }));
+              }
+            } catch (error) {
+              console.error('❌ Erro ao processar arquivo:', error);
+            }
+          })();
+        ''');
+      }
+
+      // Enviar dados para o servidor
       try {
         await _uploadFile(imagePath, 'image', qrCode: qrCode);
       } catch (uploadError, uploadStack) {
-        debugPrint('Erro ao enviar arquivo para o servidor: $uploadError');
+        debugPrint('⚠️ Erro ao enviar arquivo para o servidor: $uploadError');
         await Sentry.captureException(
           uploadError,
           stackTrace: uploadStack,
           hint: {'info': 'Erro ao fazer upload após processamento de imagem'}
               as Hint,
         );
-        // Não reenviar exceção para não interromper o fluxo do usuário
         _showError(
             'O arquivo foi processado, mas houve um erro no envio ao servidor: $uploadError');
       }
@@ -1108,43 +1141,51 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             if (mounted) {
               setState(() {
                 showFrame = true;
-                // Carregar uma página em branco para garantir que o WebView esteja ativo
-                _loadHtmlContent();
               });
             }
 
-            // Pequeno atraso para permitir que o WebView seja inicializado
-            await Future.delayed(const Duration(milliseconds: 500));
-
-            // Informar a WebView sobre a imagem usando JavaScript
+            // Converter a imagem para base64
             final String base64Image =
                 base64Encode(await File(imagePath).readAsBytes());
 
-            // Injeta JavaScript com pequeno atraso para garantir que a WebView esteja pronta
-            await _webViewController.runJavaScript(
-                'window.dispatchEvent(new CustomEvent("imageSelected", {detail: "data:image/jpeg;base64,$base64Image"}));');
-
-            // Para debug - Verifica se a WebView está respondendo
-            await _webViewController.runJavaScript(
-                'console.log("WebView recebeu imagem com tamanho: " + "${base64Image.length}");');
-
-            // Se detectou um QR code, também notificar sobre ele
-            if (qrCode != null) {
-              await _webViewController.runJavaScript('''
-                // Disparar evento para notificar o PWA sobre o QR code detectado na imagem
-                document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
-                  detail: { qrcode: "$qrCode" }
-                }));
-                
-                // Também disponibilizar o QR code como variável global
-                window.lastDetectedQRCode = "$qrCode";
-              ''');
-            }
-
-            // Força uma atualização visual
-            if (mounted) {
-              setState(() {});
-            }
+            // Carregar uma página HTML com a foto
+            await _webViewController.loadHtmlString('''
+              <!DOCTYPE html>
+              <html>
+                <head>
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <style>
+                    body { 
+                      margin: 0; 
+                      padding: 20px;
+                      background-color: white;
+                      font-family: Arial, sans-serif;
+                    }
+                    .preview-container {
+                      max-width: 100%;
+                      margin: 0 auto;
+                      text-align: center;
+                    }
+                    .preview-image {
+                      max-width: 100%;
+                      max-height: 80vh;
+                      border-radius: 8px;
+                      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    }
+                    h3 {
+                      color: #333;
+                      margin-bottom: 20px;
+                    }
+                  </style>
+                </head>
+                <body>
+                  <div class="preview-container">
+                    <h3>Foto Capturada</h3>
+                    <img src="data:image/jpeg;base64,$base64Image" class="preview-image" alt="Preview">
+                  </div>
+                </body>
+              </html>
+            ''');
           }
         } catch (e) {
           _logError('Erro ao processar imagem: $e');
@@ -1196,51 +1237,12 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
               background-color: white; 
               color: black; 
               font-family: Arial, sans-serif; 
-              display: flex;
-              justify-content: center;
-              align-items: center;
-              height: 100vh;
-              margin: 0;
-            }
-            .container {
-              text-align: center;
-              padding: 20px;
             }
           </style>
-          <script>
-            // Escutar evento de imagem selecionada
-            window.addEventListener('imageSelected', function(e) {
-              console.log('Evento imageSelected recebido');
-              const imageData = e.detail;
-              displayImage(imageData);
-            });
-            
-            function displayImage(imageData) {
-              // Cria container para imagem
-              const container = document.querySelector('.container');
-              if (!container) return;
-              
-              // Limpa conteúdo atual
-              container.innerHTML = '';
-              
-              // Cria elemento de imagem
-              const img = document.createElement('img');
-              img.src = imageData;
-              img.style.maxWidth = '100%';
-              img.style.borderRadius = '8px';
-              img.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-              
-              // Adiciona imagem ao container
-              container.appendChild(img);
-              
-              console.log('Imagem exibida no DOM');
-            }
-          </script>
         </head>
         <body>
-          <div class="container">
-            <h3>Imagem sendo processada...</h3>
-            <p>Aguarde um momento.</p>
+          <div style="padding: 20px;">
+            <h3>Escaneie um código QR para começar</h3>
           </div>
         </body>
       </html>
@@ -1325,152 +1327,11 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         return;
       }
 
-      switch (option) {
-        case 'A':
-          // Abrir na mesma página
-          _webViewController.loadRequest(Uri.parse(url));
-          setState(() {
-            showFrame = true;
-          });
-          break;
-        case 'B':
-          // Abrir em uma nova página
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => Scaffold(
-                appBar: AppBar(
-                  title: const Text('WebView em Nova Página'),
-                ),
-                body: WebViewWidget(
-                  controller: WebViewController()
-                    ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                    ..setNavigationDelegate(
-                      NavigationDelegate(
-                        onNavigationRequest: (NavigationRequest request) {
-                          if (request.url != url) {
-                            return NavigationDecision.prevent;
-                          }
-                          return NavigationDecision.navigate;
-                        },
-                      ),
-                    )
-                    ..loadRequest(Uri.parse(url)),
-                ),
-              ),
-            ),
-          );
-          break;
-        case 'C':
-          // Abrir em um modal
-          showDialog(
-            context: context,
-            builder: (context) => AlertDialog(
-              content: SizedBox(
-                height: 400,
-                child: WebViewWidget(
-                  controller: WebViewController()
-                    ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                    ..setNavigationDelegate(
-                      NavigationDelegate(
-                        onNavigationRequest: (NavigationRequest request) {
-                          if (request.url != url) {
-                            return NavigationDecision.prevent;
-                          }
-                          return NavigationDecision.navigate;
-                        },
-                      ),
-                    )
-                    ..loadRequest(Uri.parse(url)),
-                ),
-              ),
-            ),
-          );
-          break;
-        case 'D':
-          // Abrir em um popup redimensionável
-          showDialog(
-            context: context,
-            builder: (context) => StatefulBuilder(
-              builder: (context, setState) {
-                double dialogHeight = MediaQuery.of(context).size.height * 0.8;
-                double dialogWidth = MediaQuery.of(context).size.width * 0.8;
-
-                return Dialog(
-                  insetPadding: const EdgeInsets.all(10),
-                  backgroundColor: Colors.white,
-                  child: Container(
-                    height: dialogHeight,
-                    width: dialogWidth,
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade300),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: WebViewWidget(
-                        controller: WebViewController()
-                          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                          ..setNavigationDelegate(
-                            NavigationDelegate(
-                              onNavigationRequest: (NavigationRequest request) {
-                                if (request.url != url) {
-                                  return NavigationDecision.prevent;
-                                }
-                                return NavigationDecision.navigate;
-                              },
-                            ),
-                          )
-                          ..loadRequest(Uri.parse(url)),
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          );
-          break;
-        case 'E':
-          // Abrir em um navegador externo
-          try {
-            final Uri uri = Uri.parse(_urlController.text);
-
-            if (!await launchUrl(
-              uri,
-              mode: LaunchMode.externalApplication,
-            )) {
-              debugPrint('🚫 Erro ao abrir URL: ${uri.toString()}');
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                      'Não foi possível abrir o navegador externo. URL: ${uri.toString()}'),
-                  backgroundColor: Colors.red,
-                ),
-              );
-            } else {
-              debugPrint('✅ URL aberta com sucesso: ${uri.toString()}');
-            }
-          } catch (e) {
-            debugPrint('⚠️ Exceção ao abrir URL: $e');
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                    'Erro ao abrir URL: ${e.toString().substring(0, e.toString().length > 100 ? 100 : e.toString().length)}'),
-                backgroundColor: Colors.red,
-              ),
-            );
-          }
-          break;
-        case 'F':
-          // Carrega a URL no controlador existente da WebView
-          _webViewController.loadRequest(Uri.parse(url));
-
-          // Atualiza o estado para exibir o conteúdo em tela cheia
-          setState(() {
-            showFrame = true;
-          });
-          break;
-      }
+      // Carregar URL na WebView
+      await _loadUrlSafely(url);
+      setState(() {
+        showFrame = true;
+      });
     }
   }
 
@@ -1488,149 +1349,78 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
-      appBar: AppBar(
-        title: const Text('Flutter WebView Demo'),
-        actions: [
-          // Botão para forçar reload
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => _reloadWebView(),
-          ),
-          // Botão para tirar foto
-          IconButton(
-            icon: const Icon(Icons.camera_alt),
-            onPressed: () => _showCameraModal(),
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            children: [
-              // Campo de URL modificado para ser apenas de leitura
-              TextFormField(
-                controller: _urlController,
-                decoration: InputDecoration(
-                  labelText: 'URL (somente via QR code)',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8.0),
-                  ),
-                  suffixIcon: const Icon(Icons.qr_code),
-                  hintText: 'Escaneie um QR code para inserir a URL',
-                  helperText:
-                      'Este campo é preenchido automaticamente ao escanear um QR code',
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Barra de título com gradiente
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.blue.shade700, Colors.blue.shade900],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                readOnly: true, // Impede digitação direta
-                enabled: false, // Desativa o campo visualmente
-                validator: _validateUrl,
               ),
-              const SizedBox(height: 16.0),
-              Column(
-                children: ['A', 'B', 'C', 'D', 'E', 'F'].map((opt) {
-                  return Row(
-                    children: [
-                      Radio(
-                        value: opt,
-                        groupValue: option,
-                        onChanged: (value) {
-                          setState(() {
-                            option = value!;
-                          });
-                        },
-                      ),
-                      Text('Opção $opt'),
-                    ],
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 16.0),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  // Botão Executar (só fica habilitado quando houver URL)
-                  ElevatedButton(
-                    onPressed: _urlController.text.isEmpty
-                        ? null // Desabilitado quando não há URL
-                        : () async {
-                            if (_formKey.currentState!.validate()) {
-                              bool permissionsGranted =
-                                  await _checkPermissions();
-                              if (permissionsGranted) {
-                                _openUrl();
-                              }
-                            }
-                          },
-                    child: const Text('Executar'),
+                  const Text(
+                    'Bemall promoções',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                  // Botão da câmera com texto explicativo
-                  ElevatedButton.icon(
-                    onPressed: _scanQRCodeOrTakePicture,
-                    icon: const Icon(Icons.camera_alt),
-                    label: const Text('Escanear QR'),
+                  Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.refresh, color: Colors.white),
+                        onPressed: () => _reloadWebView(),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.camera_alt, color: Colors.white),
+                        onPressed: () => _showCameraModal(),
+                      ),
+                    ],
                   ),
                 ],
               ),
-              // Texto explicativo na UI
-              if (_urlController.text.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 24),
-                  child: Column(
-                    children: [
-                      const Icon(Icons.info_outline,
-                          size: 40, color: Colors.blue),
-                      const SizedBox(height: 12),
-                      const Text(
-                        "Use o botão 'Escanear QR' para capturar um código QR",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        "A URL será preenchida automaticamente e você poderá abri-la usando o botão 'Executar'",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    ],
-                  ),
-                ),
-              if (showFrame && _urlController.text.isNotEmpty)
-                Expanded(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade300),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Stack(
-                      children: [
-                        // WebView renderizado
-                        WebViewWidget(
-                          controller: _webViewController,
-                        ),
-                        // Indicador de carregamento simples
-                        FutureBuilder<bool>(
-                          future: Future.delayed(
-                              const Duration(milliseconds: 500), () => true),
-                          builder: (context, snapshot) {
-                            if (!snapshot.hasData) {
-                              return Container(
-                                color: Colors.white.withOpacity(0.7),
-                                child: const Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                              );
-                            }
-                            return const SizedBox.shrink();
+            ),
+            // Conteúdo principal
+            Expanded(
+              child: _isOrientationShown
+                  ? OrientationView(
+                      onOrientationComplete: () {
+                        setState(() {
+                          _isOrientationShown = false;
+                        });
+                        _startQRCodeReadingWithTimeout();
+                      },
+                    )
+                  : _isProcessCompleted
+                      ? CompletionView(
+                          isShowingImageCapture: (bool show) {
+                            setState(() {
+                              _isShowingImageCapture = show;
+                            });
                           },
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
+                          capturedImage: _capturedImage,
+                          onImageCaptured: (File image) {
+                            setState(() {
+                              _capturedImage = image;
+                            });
+                          },
+                          onSendComplete: () {
+                            setState(() {
+                              _isProcessCompleted = true;
+                            });
+                          },
+                        )
+                      : WebViewWidget(controller: _webViewController),
+            ),
+          ],
         ),
       ),
     );
@@ -1821,9 +1611,12 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   // Função para mostrar a câmera
   Future<void> _showCameraModal() async {
     try {
+      debugPrint('Iniciando processo de abertura da câmera...');
+
       // Verificar primeiro se temos permissão
       final PermissionStatus cameraPermissionStatus =
           await Permission.camera.request();
+      debugPrint('Status da permissão da câmera: $cameraPermissionStatus');
 
       if (!cameraPermissionStatus.isGranted) {
         _logError('Permissão de câmera negada pelo usuário');
@@ -1834,13 +1627,15 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
 
       // Verificar se é seguro abrir a câmera
       bool isSafeToOpenCamera = await _checkIfSafeToProceedWithCamera();
+      debugPrint('É seguro abrir a câmera? $isSafeToOpenCamera');
+
       if (!isSafeToOpenCamera) {
-        // A mensagem de erro já é mostrada no método _checkIfSafeToProceedWithCamera
         return;
       }
 
       // Limpar recursos e estado antes de abrir a câmera
       await _disposeResourcesBeforeCamera();
+      debugPrint('Recursos limpos, preparando para abrir câmera...');
 
       // Pequeno atraso para garantir limpeza de recursos
       await Future.delayed(const Duration(milliseconds: 300));
@@ -1852,6 +1647,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         return;
       }
 
+      debugPrint('Abrindo modal da câmera...');
       final result = await showModalBottomSheet<Map<String, dynamic>>(
         context: _scaffoldKey.currentContext!,
         isScrollControlled: true,
@@ -1887,11 +1683,14 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         },
       );
 
+      debugPrint('Resultado do modal da câmera: $result');
+
       // Restaurar WebView e recursos após fechar a câmera
       await _restoreResourcesAfterCamera();
 
       // Controle de erro - se não conseguiu abrir a câmera
       if (result == null) {
+        debugPrint('Modal da câmera fechado sem resultado');
         // Verificar por erro de Too many receivers
         final cameraErrorOccurred =
             await _webViewController.runJavaScriptReturningResult('''
@@ -1909,7 +1708,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       final String type = result['type'];
       final String data = result['data'];
 
-      debugPrint('Resultado recebido: tipo=$type, data=$data');
+      debugPrint('Processando resultado: tipo=$type, data=$data');
 
       if (type == 'qrcode') {
         // Processar QR code detectado
@@ -1924,6 +1723,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         await _processSelectedImage(data, 'camera_file_input');
       }
     } catch (e, stackTrace) {
+      debugPrint('Erro ao mostrar câmera: $e');
       _logError('Erro ao mostrar câmera: $e');
 
       // Verificar se o erro está relacionado a Too many receivers
@@ -2049,23 +1849,29 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         _logError('Erro ao enviar QR code: ${response.statusCode}');
       }
 
-      // Enviar o QR code para o WebView
-      await _webViewController.runJavaScript('''
-        (function() {
-          // Disparar evento com dados do QR code
-          const event = new CustomEvent('qrCodeScanned', {
-            detail: {
-              data: '$qrData'
-            }
-          });
-          document.dispatchEvent(event);
-          
-          // Também disponibilizar como variável global
-          window.lastScannedQRCode = '$qrData';
-          
-          console.log('QR code processado e enviado para o WebView: $qrData');
-        })();
-      ''');
+      // Verificar se o QR code é uma URL válida
+      if (qrData.startsWith('http://') || qrData.startsWith('https://')) {
+        // Carregar a URL diretamente no WebView
+        await _loadUrlSafely(qrData);
+      } else {
+        // Se não for uma URL, apenas notificar o WebView
+        await _webViewController.runJavaScript('''
+          (function() {
+            // Disparar evento com dados do QR code
+            const event = new CustomEvent('qrCodeScanned', {
+              detail: {
+                data: '$qrData'
+              }
+            });
+            document.dispatchEvent(event);
+            
+            // Também disponibilizar como variável global
+            window.lastScannedQRCode = '$qrData';
+            
+            console.log('QR code processado e enviado para o WebView: $qrData');
+          })();
+        ''');
+      }
     } catch (e, stackTrace) {
       _logError('Erro ao processar QR code: $e');
       await Sentry.captureException(e, stackTrace: stackTrace);
@@ -2232,6 +2038,138 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       debugPrint('Erro ao conectar na API: $e');
       return false;
     }
+  }
+
+  void _startQRCodeReadingWithTimeout() async {
+    await _resetCameraState(); // Resetar o estado da câmera antes de abrir
+    _showCameraModal();
+  }
+}
+
+class OrientationView extends StatelessWidget {
+  final VoidCallback onOrientationComplete;
+
+  const OrientationView({
+    Key? key,
+    required this.onOrientationComplete,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(
+            Icons.screen_rotation,
+            size: 80,
+            color: Colors.blue,
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Gire o dispositivo para o modo paisagem',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 40),
+          ElevatedButton(
+            onPressed: onOrientationComplete,
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 32,
+                vertical: 16,
+              ),
+            ),
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CompletionView extends StatelessWidget {
+  final Function(bool) isShowingImageCapture;
+  final File? capturedImage;
+  final Function(File) onImageCaptured;
+  final VoidCallback onSendComplete;
+
+  const CompletionView({
+    Key? key,
+    required this.isShowingImageCapture,
+    required this.capturedImage,
+    required this.onImageCaptured,
+    required this.onSendComplete,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          const Text(
+            'Certifique-se de que as seguintes informações estão visíveis:',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: const [
+              Text('Valor'),
+              Text('Data'),
+              Text('Loja'),
+            ],
+          ),
+          const SizedBox(height: 20),
+          if (capturedImage != null)
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.file(
+                  capturedImage!,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () {
+                    isShowingImageCapture(true);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: Colors.blue,
+                    side: const BorderSide(color: Colors.blue),
+                  ),
+                  child: const Text('Nova Foto'),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: onSendComplete,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Enviar'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
 

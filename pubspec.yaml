@@ -1,5 +1,5 @@
-name: flutter_webview_demo
-description: "A new Flutter project."
+name: bemall_promocoes
+description: Aplicativo Bemall Promoções
 publish_to: "none"
 version: 0.1.0
 
@@ -21,6 +21,7 @@ dependencies:
   path_provider: ^2.1.0
   camera: ^0.11.1
   shared_preferences: ^2.5.2
+  flutter_launcher_icons: ^0.14.3
 
 dev_dependencies:
   flutter_test:
@@ -29,3 +30,13 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon.png"
+  remove_alpha_ios: true
