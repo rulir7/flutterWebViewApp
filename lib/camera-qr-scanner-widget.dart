@@ -8,6 +8,7 @@ import 'package:camera/camera.dart';
 import 'dart:typed_data';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
+import './logger.dart'; // Importando a classe Logger
 
 class CameraWithQRScanner extends StatefulWidget {
   final Function(String) onQRCodeDetected;
@@ -188,11 +189,12 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
     } catch (e, stackTrace) {
       debugPrint('❌ Erro ao inicializar câmera: $e');
 
-      // Registrar no Sentry
-      await Sentry.captureException(
+      // Registrar no Logger em vez do Sentry diretamente
+      await Logger.captureException(
         e,
         stackTrace: stackTrace,
-        hint: {'info': 'Erro na inicialização da câmera'} as Hint,
+        category: 'camera_init',
+        extra: {'init_attempts': _initAttempts},
       );
 
       // Verificar se é um erro de Too many receivers
@@ -746,6 +748,7 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
     }
 
     setState(() => _isProcessing = true);
+    String? imagePath;
 
     try {
       // Feedback tátil
@@ -753,7 +756,7 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
 
       // Capturar foto
       final XFile photo = await _cameraController!.takePicture();
-      final String imagePath = photo.path;
+      imagePath = photo.path;
 
       debugPrint('📸 Foto capturada: $imagePath');
 
@@ -784,11 +787,12 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
     } catch (e, stackTrace) {
       debugPrint('❌ Erro ao capturar foto: $e');
 
-      // Registrar no Sentry
-      await Sentry.captureException(
+      // Registrar no Logger em vez do Sentry diretamente
+      await Logger.captureException(
         e,
         stackTrace: stackTrace,
-        hint: {'info': 'Erro ao capturar foto'} as Hint,
+        category: 'photo_capture',
+        extra: {'image_path': imagePath},
       );
 
       if (mounted) {

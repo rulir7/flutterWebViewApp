@@ -10,10 +10,14 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import './camera-qr-scanner-widget.dart';
+import './sentry_config.dart'; // Importando nossa configuração
+import './logger.dart'; // Importando nosso logger
 import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
+import 'package:http_parser/http_parser.dart';
 
 // URL para enviar dados
 const String apiUrl = 'http://rulir.ddns.net:3003/api/upload';
@@ -39,11 +43,43 @@ Future<void> main() async {
 
   await SentryFlutter.init(
     (options) {
-      options.dsn =
-          'https://5573f26d70d7e90910b448932b8d0626@o4508931864330240.ingest.us.sentry.io/4508931871866880';
-      options.tracesSampleRate = 1.0;
+      options.dsn = SentryConfig.dsn;
+      options.tracesSampleRate = SentryConfig.tracesSampleRate;
+      options.environment = SentryConfig.environment;
+      options.release = SentryConfig.release;
+      options.attachScreenshot = SentryConfig.attachScreenshot;
+      options.attachViewHierarchy = SentryConfig.attachViewHierarchy;
+      options.enableAutoPerformanceTracing =
+          SentryConfig.enableAutoPerformanceTracing;
+      options.enableUserInteractionTracing =
+          SentryConfig.enableUserInteractionTracing;
+
+      // Adicionar tags úteis para identificação
+      options.dist = SentryConfig.dist;
+      options.debug = SentryConfig.debug;
+
+      // Capturar erros não tratados automaticamente
+      options.autoAppStart = SentryConfig.autoAppStart;
+
+      // Definir informações de usuário padrão (se disponíveis)
+      // options.beforeSend = (event, {hint}) {
+      //   return event..user = SentryUser(id: 'user-id', email: 'user@example.com');
+      // };
     },
-    appRunner: () => runApp(const MyApp()),
+    appRunner: () {
+      // Inicializar o Logger com tags padrão
+      Logger.setDefaultTags({
+        'app_version': SentryConfig.release,
+        'environment': SentryConfig.environment,
+        'device_model': Platform.localHostname,
+      });
+
+      // Registrar inicialização do app
+      Logger.info('Aplicativo inicializado', category: 'app_lifecycle');
+
+      // Iniciar a aplicação
+      runApp(const MyApp());
+    },
   );
 }
 
@@ -205,10 +241,14 @@ void _markReceiverResetRequired() {
   // Persistir o estado para manter mesmo após reiniciar o app
   _savePersistedState();
 
-  // Registrar no Sentry
-  Sentry.captureMessage(
+  // Registrar no Sentry usando o Logger
+  Logger.warning(
     'Aplicativo marcado para reinicialização devido a Too many receivers',
-    level: SentryLevel.warning,
+    category: 'app_lifecycle',
+    extra: {
+      'camera_attempt_count': _cameraAttemptCount,
+      'last_reset': _lastCameraReset?.toIso8601String(),
+    },
   );
 
   // Armazenar o estado no armazenamento local do WebView também
@@ -576,8 +616,8 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   }
 
   void _logError(String message) {
-    Sentry.captureMessage(message, level: SentryLevel.error);
-    debugPrint('ERROR: $message');
+    // Usando o Logger ao invés do Sentry diretamente
+    Logger.error(message, category: 'webview');
   }
 
   @override
@@ -768,15 +808,23 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         final String jsonResult = result.toString();
         debugPrint('Diagnóstico WebView: $jsonResult');
 
-        // Podemos enviar esses diagnósticos para o Sentry também
-        Sentry.addBreadcrumb(
-          Breadcrumb(
-            category: 'webview.diagnostics',
-            message: 'WebView health check',
-            data: jsonDecode(jsonResult),
-            level: SentryLevel.info,
-          ),
-        );
+        try {
+          // Converter a string JSON para um Map
+          final Map<String, dynamic> diagnostics = jsonDecode(jsonResult);
+
+          // Podemos enviar esses diagnósticos para o Sentry também
+          Sentry.addBreadcrumb(
+            Breadcrumb(
+              category: 'webview.diagnostics',
+              message: 'WebView health check',
+              data: diagnostics,
+              level: SentryLevel.info,
+            ),
+          );
+        } catch (jsonError) {
+          Logger.warning('Erro ao processar JSON do diagnóstico: $jsonError',
+              category: 'webview', extra: {'raw_json': jsonResult});
+        }
       }
     } catch (e, stackTrace) {
       _logError('Erro ao realizar diagnóstico do WebView: $e');
@@ -1275,13 +1323,20 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     try {
       debugPrint(
           'Enviando arquivo: $filePath | Tipo: $type | QR Code: $qrCode');
+
+      // Comprimir e redimensionar a imagem
+      final File imageFile = File(filePath);
+      final Uint8List compressedImage = await compressAndResizeImage(imageFile);
+
+      // SERVIDOR ATUAL - Manteremos usando este por enquanto
       final uri = Uri.parse(apiUrl);
 
       // Criar um request multipart
       final request = http.MultipartRequest('POST', uri);
 
       // Adicionar o arquivo como um arquivo multipart
-      request.files.add(await http.MultipartFile.fromPath('file', filePath));
+      request.files.add(http.MultipartFile.fromBytes('file', compressedImage,
+          filename: 'photo.jpg', contentType: MediaType('image', 'jpeg')));
 
       // Adicionar outros campos
       request.fields['type'] = type;
@@ -1292,20 +1347,60 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         debugPrint('Enviando QR code junto com a imagem: $qrCode');
       }
 
+      /* 
+      // NOVO SERVIDOR E ENDPOINT - Comentado até termos as informações completas
+      // Construir a URL completa com o endpoint correto
+      // final baseUrl = "https://seuservidor.com"; // Substituir pelo servidor correto
+      // final uri = Uri.parse('$baseUrl/mkt/promotion/hash/upload-qrcode-photo');
+      
+      // // Criar um request multipart
+      // final request = http.MultipartRequest('POST', uri);
+      
+      // // Adicionar a imagem comprimida como um arquivo multipart
+      // request.files.add(
+      //   http.MultipartFile.fromBytes(
+      //     'photo', 
+      //     compressedImage,
+      //     filename: 'photo.jpg',
+      //     contentType: MediaType('image', 'jpeg')
+      //   )
+      // );
+      
+      // // Se houver QR code, adicionar como campo separado
+      // if (qrCode != null) {
+      //   request.files.add(
+      //     http.MultipartFile.fromString(
+      //       'qrcode', 
+      //       qrCode,
+      //       filename: 'qrcode.txt',
+      //       contentType: MediaType('text', 'plain')
+      //     )
+      //   );
+      // }
+      */
+
       // Enviar o request e obter a resposta
       final streamedResponse = await request.send();
       final responseBody = await streamedResponse.stream.bytesToString();
 
       if (streamedResponse.statusCode == 200) {
+        Logger.info('Arquivo enviado com sucesso!',
+            extra: {'qrCode': qrCode != null, 'size': compressedImage.length},
+            category: 'upload');
         debugPrint(
             'Arquivo enviado com sucesso! ${qrCode != null ? "Com QR code" : "Sem QR code"}');
       } else {
+        Logger.error('Erro ao enviar arquivo: ${streamedResponse.statusCode}',
+            extra: {'response': responseBody}, category: 'upload');
         _logError('Erro ao enviar arquivo: ${streamedResponse.statusCode}');
         _logError('Resposta: $responseBody');
       }
     } catch (e, stackTrace) {
+      Logger.captureException(e,
+          stackTrace: stackTrace,
+          category: 'upload',
+          extra: {'filePath': filePath, 'type': type});
       _logError('Exceção ao enviar arquivo: $e');
-      await Sentry.captureException(e, stackTrace: stackTrace);
     }
   }
 
@@ -1382,6 +1477,26 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
                       IconButton(
                         icon: const Icon(Icons.camera_alt, color: Colors.white),
                         onPressed: () => _showCameraModal(),
+                      ),
+                      PopupMenuButton<String>(
+                        icon: const Icon(Icons.more_vert, color: Colors.white),
+                        onSelected: (String value) {
+                          if (value == 'test_sentry') {
+                            _testSentryCapture();
+                          }
+                        },
+                        itemBuilder: (BuildContext context) => [
+                          const PopupMenuItem<String>(
+                            value: 'test_sentry',
+                            child: Row(
+                              children: [
+                                Icon(Icons.bug_report),
+                                SizedBox(width: 8),
+                                Text('Testar Sentry'),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -2044,6 +2159,45 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     await _resetCameraState(); // Resetar o estado da câmera antes de abrir
     _showCameraModal();
   }
+
+  // Adicionar função para testar o Sentry
+  Future<void> _testSentryCapture() async {
+    try {
+      // Criar um evento de teste usando o Logger
+      Logger.info(
+        'Teste manual do Logger/Sentry',
+        extra: {'source': 'manual_test'},
+        category: 'test',
+      );
+
+      // Mostrar mensagem de sucesso
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Evento de teste enviado para o Sentry com sucesso!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      // Simular um erro para testar captura de exceções
+      // Comentado para não criar erros acidentais durante uso normal
+      // throw Exception('Exceção de teste para o Sentry');
+    } catch (e, stackTrace) {
+      // Capturar exceção com stack trace usando o Logger
+      await Logger.captureException(
+        e,
+        stackTrace: stackTrace,
+        category: 'test',
+      );
+
+      // Mostrar mensagem de erro capturado
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Erro de teste capturado e enviado para o Sentry!'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+  }
 }
 
 class OrientationView extends StatelessWidget {
@@ -2196,4 +2350,49 @@ class QRViewExample extends StatelessWidget {
       ),
     );
   }
+}
+
+// Função para comprimir e redimensionar a imagem
+// Implementa o algoritmo de redimensionamento similar ao fornecido no código TypeScript:
+// - Largura máxima de 1280px
+// - Mantém a proporção da imagem original
+// - Aplica interpolação linear para melhor qualidade
+Future<Uint8List> compressAndResizeImage(File imageFile) async {
+  // Carregar a imagem
+  final Uint8List imageBytes = await imageFile.readAsBytes();
+  final img.Image? image = img.decodeImage(imageBytes);
+
+  if (image == null) throw Exception('Não foi possível decodificar a imagem');
+
+  // Calcular nova largura e altura mantendo proporção
+  int targetWidth = image.width > 1280 ? 1280 : image.width;
+  int targetHeight = (targetWidth * image.height) ~/ image.width;
+
+  Logger.info('Redimensionando imagem:',
+      extra: {
+        'largura_original': image.width,
+        'altura_original': image.height,
+        'nova_largura': targetWidth,
+        'nova_altura': targetHeight,
+      },
+      category: 'image_processing');
+
+  // Redimensionar a imagem
+  final img.Image resizedImage = img.copyResize(image,
+      width: targetWidth,
+      height: targetHeight,
+      interpolation: img.Interpolation.linear);
+
+  // Converter para JPEG com boa qualidade (WebP não é suportado diretamente)
+  final compressedBytes = img.encodeJpg(resizedImage, quality: 85);
+  Logger.info('Imagem comprimida:',
+      extra: {
+        'tamanho_bytes_original': imageBytes.length,
+        'tamanho_bytes_final': compressedBytes.length,
+        'redução':
+            '${(100 - (compressedBytes.length * 100 / imageBytes.length)).toStringAsFixed(2)}%',
+      },
+      category: 'image_processing');
+
+  return Uint8List.fromList(compressedBytes);
 }
