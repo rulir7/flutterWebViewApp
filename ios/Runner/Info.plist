@@ -24,6 +24,16 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Este aplicativo precisa de acesso à câmera para escanear códigos QR e tirar fotos</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Este aplicativo precisa de acesso à galeria para selecionar fotos</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Este aplicativo precisa de permissão para salvar fotos na galeria</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Este aplicativo pode precisar de acesso ao microfone para recursos de vídeo</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Este aplicativo pode precisar de sua localização para melhorar as promoções</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
@@ -41,6 +51,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
@@ -50,11 +62,5 @@
     <key>NSAllowsArbitraryLoads</key>
     <true/>
 	</dict>
-    <key>NSCameraUsageDescription</key>
-    <string>Este aplicativo precisa acessar a câmera.</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Este aplicativo precisa acessar a biblioteca de fotos.</string>
-    <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Este aplicativo precisa acessar sua localização enquanto estiver em uso.</string>
 </dict>
 </plist>

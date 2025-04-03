@@ -168,6 +168,17 @@ Future<void> _checkAndCleanupReceivers() async {
       } catch (e) {
         debugPrint('⚠️ Erro ao tentar liberar recursos do sistema: $e');
       }
+    } else if (Platform.isIOS) {
+      // No iOS não temos o problema dos receptores em excesso,
+      // mas podemos fazer uma limpeza geral de memória
+      debugPrint('📱 iOS: Realizando limpeza de memória preventiva');
+      try {
+        // No iOS, invocar coleta de lixo quando possível
+        await SystemChannels.platform.invokeMethod<void>('System.gc');
+      } catch (e) {
+        // Ignora erro caso o método não exista no iOS
+        debugPrint('ℹ️ Limpeza de memória no iOS: $e');
+      }
     }
   } catch (e) {
     debugPrint('⚠️ Erro ao verificar receivers: $e');
@@ -189,42 +200,53 @@ Future<void> _resetCameraState() async {
 
 // Verificar se é seguro abrir a câmera
 Future<bool> _isSafeToOpenCamera() async {
-  // Se não for Android, sempre retorna verdadeiro
-  if (!Platform.isAndroid) return true;
-
-  // Se já precisamos de reset, não é seguro
-  if (_receiverResetRequired) {
-    debugPrint('🚫 Câmera bloqueada: Reset do aplicativo necessário');
-    return false;
+  // Se for iOS, sempre retorna verdadeiro com log específico
+  if (Platform.isIOS) {
+    debugPrint(
+        '📱 iOS: Liberando acesso à câmera (não há restrições de receptores no iOS)');
+    return true;
   }
 
-  // Se tentou abrir a câmera muitas vezes em sequência
-  if (_cameraAttemptCount >= 5) {
-    debugPrint('⚠️ Muitas tentativas de abrir a câmera: $_cameraAttemptCount');
-
-    // Se já passou 2 minutos desde o último reset, resetamos o contador
-    if (_lastCameraReset != null &&
-        DateTime.now().difference(_lastCameraReset!).inMinutes >= 2) {
-      await _resetCameraState();
-      return true;
+  // Para Android, mantém a lógica específica
+  if (Platform.isAndroid) {
+    // Se já precisamos de reset, não é seguro
+    if (_receiverResetRequired) {
+      debugPrint(
+          '🚫 Android: Câmera bloqueada: Reset do aplicativo necessário');
+      return false;
     }
 
-    debugPrint('🚫 Bloqueando acesso à câmera por muitas tentativas recentes');
-    return false;
-  }
+    // Se tentou abrir a câmera muitas vezes em sequência
+    if (_cameraAttemptCount >= 5) {
+      debugPrint(
+          '⚠️ Android: Muitas tentativas de abrir a câmera: $_cameraAttemptCount');
 
-  // Incrementar contador de tentativas e salvar
-  _cameraAttemptCount++;
-  await _savePersistedState();
+      // Se já passou 2 minutos desde o último reset, resetamos o contador
+      if (_lastCameraReset != null &&
+          DateTime.now().difference(_lastCameraReset!).inMinutes >= 2) {
+        await _resetCameraState();
+        return true;
+      }
 
-  // Limpar memória do sistema
-  try {
-    debugPrint('🧹 Limpando memória do sistema antes de usar a câmera');
-    await SystemChannels.platform
-        .invokeMethod<void>('SystemNavigator.routeUpdated');
-    await Future.delayed(const Duration(milliseconds: 200));
-  } catch (e) {
-    debugPrint('⚠️ Erro ao limpar memória: $e');
+      debugPrint(
+          '🚫 Android: Bloqueando acesso à câmera por muitas tentativas recentes');
+      return false;
+    }
+
+    // Incrementar contador de tentativas e salvar
+    _cameraAttemptCount++;
+    await _savePersistedState();
+
+    // Limpar memória do sistema
+    try {
+      debugPrint(
+          '🧹 Android: Limpando memória do sistema antes de usar a câmera');
+      await SystemChannels.platform
+          .invokeMethod<void>('SystemNavigator.routeUpdated');
+      await Future.delayed(const Duration(milliseconds: 200));
+    } catch (e) {
+      debugPrint('⚠️ Erro ao limpar memória: $e');
+    }
   }
 
   return true;
@@ -1736,7 +1758,11 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
+      // No iOS, aplicar padding adicional para evitar colisão com a barra de status
       body: SafeArea(
+        // iOS tem bottom safe area diferente (especialmente no iPhone X+)
+        bottom: Platform.isIOS,
+        top: true,
         child: Column(
           children: [
             // Barra de título com gradiente
@@ -2756,41 +2782,67 @@ class QRViewExample extends StatelessWidget {
 // - Mantém a proporção da imagem original
 // - Aplica interpolação linear para melhor qualidade
 Future<Uint8List> compressAndResizeImage(File imageFile) async {
-  // Carregar a imagem
-  final Uint8List imageBytes = await imageFile.readAsBytes();
-  final img.Image? image = img.decodeImage(imageBytes);
+  try {
+    // Carregar a imagem
+    final Uint8List imageBytes = await imageFile.readAsBytes();
 
-  if (image == null) throw Exception('Não foi possível decodificar a imagem');
+    // Verificar se temos bytes da imagem
+    if (imageBytes.isEmpty) {
+      throw Exception('Arquivo de imagem vazio');
+    }
 
-  // Calcular nova largura e altura mantendo proporção
-  int targetWidth = image.width > 1280 ? 1280 : image.width;
-  int targetHeight = (targetWidth * image.height) ~/ image.width;
+    // Decodificar a imagem
+    final img.Image? image = img.decodeImage(imageBytes);
+    if (image == null) throw Exception('Não foi possível decodificar a imagem');
 
-  Logger.info('Redimensionando imagem:',
-      extra: {
-        'largura_original': image.width,
-        'altura_original': image.height,
-        'nova_largura': targetWidth,
-        'nova_altura': targetHeight,
-      },
-      category: 'image_processing');
+    // Calcular nova largura e altura mantendo proporção
+    int targetWidth = image.width > 1280 ? 1280 : image.width;
+    int targetHeight = (targetWidth * image.height) ~/ image.width;
 
-  // Redimensionar a imagem
-  final img.Image resizedImage = img.copyResize(image,
-      width: targetWidth,
-      height: targetHeight,
-      interpolation: img.Interpolation.linear);
+    Logger.info('Redimensionando imagem:',
+        extra: {
+          'largura_original': image.width,
+          'altura_original': image.height,
+          'nova_largura': targetWidth,
+          'nova_altura': targetHeight,
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+        },
+        category: 'image_processing');
 
-  // Converter para JPEG com boa qualidade (WebP não é suportado diretamente)
-  final compressedBytes = img.encodeJpg(resizedImage, quality: 85);
-  Logger.info('Imagem comprimida:',
-      extra: {
-        'tamanho_bytes_original': imageBytes.length,
-        'tamanho_bytes_final': compressedBytes.length,
-        'redução':
-            '${(100 - (compressedBytes.length * 100 / imageBytes.length)).toStringAsFixed(2)}%',
-      },
-      category: 'image_processing');
+    // Redimensionar a imagem
+    final img.Image resizedImage = img.copyResize(image,
+        width: targetWidth,
+        height: targetHeight,
+        interpolation: img.Interpolation.linear);
 
-  return Uint8List.fromList(compressedBytes);
+    // Converter para JPEG com boa qualidade (WebP não é suportado diretamente)
+    // Qualidade de 85% oferece bom equilíbrio entre tamanho e qualidade
+    final compressedBytes = img.encodeJpg(resizedImage, quality: 85);
+
+    // Registrar métricas de compressão
+    final compressionRatio = compressedBytes.length * 100 / imageBytes.length;
+    final reductionPercent = 100 - compressionRatio;
+
+    Logger.info('Imagem comprimida:',
+        extra: {
+          'tamanho_bytes_original': imageBytes.length,
+          'tamanho_bytes_final': compressedBytes.length,
+          'redução': '${reductionPercent.toStringAsFixed(2)}%',
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+        },
+        category: 'image_processing');
+
+    return Uint8List.fromList(compressedBytes);
+  } catch (e, stackTrace) {
+    // Capturar e logar qualquer erro durante o processamento da imagem
+    Logger.error('Erro ao comprimir e redimensionar imagem: $e',
+        extra: {
+          'caminho_arquivo': imageFile.path,
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+        },
+        category: 'image_processing');
+
+    // Re-lançar exceção para ser tratada no chamador
+    throw Exception('Falha ao processar imagem: $e');
+  }
 }
