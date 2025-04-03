@@ -782,53 +782,195 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   // Função para realizar teste de integridade do WebView
   Future<void> _performWebViewHealthCheck() async {
     try {
-      // Injetar e executar scripts de diagnóstico
-      final result = await _webViewController.runJavaScriptReturningResult('''
-        (function() {
-          const diagnostics = {
-            url: window.location.href,
-            userAgent: navigator.userAgent,
-            cookiesEnabled: navigator.cookieEnabled,
-            localStorage: !!window.localStorage,
-            sessionStorage: !!window.sessionStorage,
-            indexedDB: !!window.indexedDB,
-            cacheAPI: !!window.caches,
-            serviceWorker: !!navigator.serviceWorker,
-            network: navigator.onLine,
-            webViewRendering: document.body !== null,
-            domContentLoaded: document.readyState
-          };
-          
-          return JSON.stringify(diagnostics);
-        })();
-      ''');
+      // Verificar se os diagnósticos estão desativados na página atual
+      // Usamos toString() == 'true' para lidar com diferentes tipos de retorno
+      try {
+        final disableCheck =
+            await _webViewController.runJavaScriptReturningResult('''
+          (function() {
+            try {
+              return (window.disableDiagnostics === true).toString();
+            } catch(e) {
+              return 'false';
+            }
+          })();
+        ''');
 
-      // Processar e registrar resultados
-      if (result != null) {
-        final String jsonResult = result.toString();
-        debugPrint('Diagnóstico WebView: $jsonResult');
-
-        try {
-          // Converter a string JSON para um Map
-          final Map<String, dynamic> diagnostics = jsonDecode(jsonResult);
-
-          // Podemos enviar esses diagnósticos para o Sentry também
-          Sentry.addBreadcrumb(
-            Breadcrumb(
-              category: 'webview.diagnostics',
-              message: 'WebView health check',
-              data: diagnostics,
-              level: SentryLevel.info,
-            ),
-          );
-        } catch (jsonError) {
-          Logger.warning('Erro ao processar JSON do diagnóstico: $jsonError',
-              category: 'webview', extra: {'raw_json': jsonResult});
+        final String disableResult =
+            disableCheck.toString().toLowerCase().trim();
+        if (disableResult == 'true') {
+          debugPrint(
+              'Diagnóstico do WebView ignorado: diagnósticos desativados na página atual');
+          return;
         }
+      } catch (e) {
+        debugPrint('Erro ao verificar flag disableDiagnostics: $e');
+        // Se não conseguimos verificar, desistimos da verificação de saúde
+        return;
       }
+
+      // Verificar o URL atual para determinar se estamos em about:blank ou data:
+      String currentUrl = '';
+      try {
+        currentUrl = await _webViewController.currentUrl() ?? '';
+      } catch (e) {
+        debugPrint('Erro ao obter URL atual: $e');
+        // Se não podemos obter URL, desistimos da verificação
+        return;
+      }
+
+      // Se estivermos em about:blank ou em uma URL de data (como uma imagem base64),
+      // ou em uma URL vazia, não executamos diagnósticos
+      final bool isEmptyPage = currentUrl.isEmpty ||
+          currentUrl == 'about:blank' ||
+          currentUrl.startsWith('data:');
+
+      if (isEmptyPage) {
+        debugPrint(
+            'Diagnóstico do WebView ignorado: página vazia ou about:blank');
+        return;
+      }
+
+      // Criamos um diagnóstico básico que funciona em qualquer página
+      final basicScript = '''
+        (function() {
+          try {
+            return JSON.stringify({
+              url: document.location.href || '',
+              userAgent: navigator.userAgent || '',
+              pageTitle: document.title || '',
+              domState: document.readyState || '',
+              timestamp: new Date().toISOString(),
+              isSecure: window.location.protocol === 'https:',
+              screenWidth: window.innerWidth,
+              screenHeight: window.innerHeight
+            });
+          } catch (e) {
+            return JSON.stringify({
+              error: e.toString(),
+              errorType: 'basic_diagnostics_error'
+            });
+          }
+        })();
+      ''';
+
+      // Se não estivermos em uma página vazia, adicione verificações avançadas
+      final advancedScript = '''
+        (function() {
+          try {
+            var hasLocalStorage = false;
+            var hasSessionStorage = false;
+            var hasCookies = false;
+            var hasIndexedDB = false;
+            
+            try { 
+              hasLocalStorage = !!window.localStorage; 
+            } catch(e) {}
+            
+            try { 
+              hasSessionStorage = !!window.sessionStorage; 
+            } catch(e) {}
+            
+            try { 
+              hasCookies = navigator.cookieEnabled; 
+            } catch(e) {}
+            
+            try { 
+              hasIndexedDB = !!window.indexedDB; 
+            } catch(e) {}
+            
+            return JSON.stringify({
+              hasLocalStorage: hasLocalStorage,
+              hasSessionStorage: hasSessionStorage,
+              hasCookies: hasCookies,
+              hasIndexedDB: hasIndexedDB,
+              isOnline: navigator.onLine,
+              hasServiceWorker: 'serviceWorker' in navigator
+            });
+          } catch (e) {
+            return JSON.stringify({
+              error: e.toString(),
+              errorType: 'advanced_diagnostics_error'
+            });
+          }
+        })();
+      ''';
+
+      // Executar diagnóstico básico
+      Map<String, dynamic> diagnostics = {};
+      try {
+        final basicResult =
+            await _webViewController.runJavaScriptReturningResult(basicScript);
+
+        // Processar resultado básico
+        if (basicResult != null) {
+          final String basicJson = basicResult.toString();
+
+          if (basicJson != "null" && basicJson.isNotEmpty) {
+            try {
+              diagnostics = Map<String, dynamic>.from(jsonDecode(basicJson));
+              debugPrint('Diagnóstico básico WebView: $basicJson');
+            } catch (e) {
+              debugPrint('Erro ao decodificar diagnóstico básico: $e');
+              // Se não conseguimos processar o básico, desistimos
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Erro ao executar diagnóstico básico: $e');
+        return;
+      }
+
+      // Se diagnostics está vazio, não continuar
+      if (diagnostics.isEmpty) {
+        Logger.warning('Não foi possível obter diagnósticos básicos do WebView',
+            category: 'webview.diagnostics');
+        return;
+      }
+
+      // Se não estamos em about:blank, executar diagnóstico avançado
+      try {
+        final advancedResult = await _webViewController
+            .runJavaScriptReturningResult(advancedScript);
+
+        if (advancedResult != null) {
+          final String advancedJson = advancedResult.toString();
+
+          if (advancedJson != "null" && advancedJson.isNotEmpty) {
+            try {
+              final Map<String, dynamic> advancedData =
+                  Map<String, dynamic>.from(jsonDecode(advancedJson));
+
+              // Mesclar dados avançados com o diagnóstico básico
+              diagnostics.addAll(advancedData);
+              debugPrint('Diagnóstico avançado WebView: $advancedJson');
+            } catch (e) {
+              debugPrint('Erro ao decodificar diagnóstico avançado: $e');
+              // Podemos continuar apenas com o básico
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Erro ao executar diagnóstico avançado: $e');
+        // Podemos continuar apenas com o básico
+      }
+
+      // Adicionar informações sobre a página
+      diagnostics['isEmptyPage'] = isEmptyPage;
+      diagnostics['pageType'] = isEmptyPage ? 'empty' : 'content';
+
+      // Log de sucesso - enviar sem try/catch para não mascarar erros de diagnóstico
+      // que estamos tentando consertar
+      Logger.info('Diagnóstico do WebView concluído',
+          category: 'webview.diagnostics', extra: diagnostics);
     } catch (e, stackTrace) {
-      _logError('Erro ao realizar diagnóstico do WebView: $e');
-      await Sentry.captureException(e, stackTrace: stackTrace);
+      // Evitar enviar exceção para o Sentry para não criar loop
+      debugPrint('⚠️ Erro ao realizar diagnóstico do WebView: $e');
+
+      // Apenas registrar como warning, sem tentar capturar exceção
+      Logger.warning('Erro ao realizar diagnóstico do WebView: $e',
+          category: 'webview', extra: {'errorDetails': e.toString()});
     }
   }
 
@@ -923,6 +1065,9 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     try {
       debugPrint('Processando imagem: $imagePath');
 
+      // Cancelar qualquer verificação de saúde atual para evitar diagnósticos durante o processamento
+      _healthCheckTimer?.cancel();
+
       // Verificar se o arquivo existe
       final file = File(imagePath);
       if (!await file.exists()) {
@@ -953,12 +1098,24 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         debugPrint('⚠️ Erro ao tentar detectar QR code: $e');
       }
 
-      // Sempre mostrar a imagem capturada em uma página HTML
-      await _webViewController.loadHtmlString('''
+      // O código HTML para exibir a imagem
+      final String photoHtml = '''
         <!DOCTYPE html>
         <html>
           <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Foto Capturada</title>
+            <script>
+              // Garantir que diagnósticos estão desativados (definido antes do corpo da página)
+              window.disableDiagnostics = true;
+              
+              // Informe à página pai que os diagnósticos devem ser desativados
+              try {
+                if (window.parent) {
+                  window.parent.disableDiagnostics = true;
+                }
+              } catch(e) {}
+            </script>
             <style>
               body { 
                 margin: 0; 
@@ -1006,16 +1163,50 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
               </div>
             </div>
             <script>
-              // Se tiver QR code com URL, redirecionar após 1 segundo
-              ${qrCode != null && (qrCode.startsWith('http://') || qrCode.startsWith('https://')) ? '''
-                setTimeout(function() {
-                  window.location.href = "$qrCode";
-                }, 1000);
-              ''' : ''}
+              // Desabilitar diagnósticos novamente para ter certeza
+              window.disableDiagnostics = true;
+              
+              // Bloqueamos explicitamente diagnósticos
+              window.addEventListener('load', function() {
+                // Garantir que diagnósticos estão desativados mesmo após carregamento
+                window.disableDiagnostics = true;
+                
+                // Se tiver QR code com URL, redirecionar após 1 segundo
+                ${qrCode != null && (qrCode.startsWith('http://') || qrCode.startsWith('https://')) ? '''
+                  setTimeout(function() {
+                    window.location.href = "$qrCode";
+                  }, 1000);
+                ''' : ''}
+              });
             </script>
           </body>
         </html>
-      ''');
+      ''';
+
+      // Assegurar que diagnósticos estão realmente desabilitados
+      await _webViewController
+          .runJavaScript("window.disableDiagnostics = true;");
+
+      // Sempre mostrar a imagem capturada em uma página HTML
+      await _webViewController.loadHtmlString(photoHtml);
+
+      // Verificar novamente para garantir que a flag está ativa
+      await Future.delayed(const Duration(milliseconds: 500));
+      await _webViewController
+          .runJavaScript("window.disableDiagnostics = true;");
+
+      // Desabilitar temporariamente o health check quando mostramos uma imagem sem QR code
+      if (qrCode == null) {
+        // Cancelar o timer de health check atual
+        _healthCheckTimer?.cancel();
+
+        // Reativar o timer após tempo suficiente (aumentado para 10 segundos) após a página estar completamente carregada
+        Future.delayed(const Duration(seconds: 10), () {
+          if (mounted) {
+            _startPeriodicHealthCheck();
+          }
+        });
+      }
 
       // Se foi detectado um QR code com URL, carregar a URL no WebView após mostrar a prévia
       if (qrCode != null &&
@@ -1029,6 +1220,9 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         await _webViewController.runJavaScript('''
           (function() {
             try {
+              // Garantir que diagnósticos estão desativados
+              window.disableDiagnostics = true;
+              
               const input = document.getElementById('$inputId') || document.querySelector('input[type="file"]');
               if (!input) {
                 console.error('Input element not found: $inputId');
@@ -1092,6 +1286,15 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       bool hasPermission = await _checkPermissions();
       if (!hasPermission) return;
 
+      // Desativar diagnósticos e cancelar health check
+      _healthCheckTimer?.cancel();
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      } catch (e) {
+        debugPrint('Erro ao desabilitar diagnósticos antes da câmera: $e');
+      }
+
       // Abre um modal customizado com câmera que permite escanear QR code ou tirar foto
       final result = await showModalBottomSheet<Map<String, dynamic>>(
         context: context,
@@ -1119,10 +1322,26 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         ),
       );
 
-      // Se não houver resultado, o usuário cancelou
-      if (result == null) return;
+      // Assegurar que diagnósticos estão desabilitados após fechar o modal
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      } catch (e) {
+        debugPrint('Erro ao desabilitar diagnósticos após câmera: $e');
+      }
 
-      // Processar o resultado após o modal ser fechado
+      // Se não houver resultado, o usuário cancelou
+      if (result == null) {
+        // Reativar health check após 10 segundos
+        Future.delayed(const Duration(seconds: 10), () {
+          if (mounted) {
+            _startPeriodicHealthCheck();
+          }
+        });
+        return;
+      }
+
+      // Processar o resultado após o modal ser fechado - manter diagnósticos desativados
       if (result['type'] == 'qrcode') {
         final String code = result['data'];
         final String? imagePath = result['imagePath']
@@ -1192,16 +1411,25 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
               });
             }
 
-            // Converter a imagem para base64
+            // Converter a imagem para base64 - diagnósticos continuam desabilitados
             final String base64Image =
                 base64Encode(await File(imagePath).readAsBytes());
 
+            // Certificar que diagnósticos estão desativados
+            await _webViewController
+                .runJavaScript("window.disableDiagnostics = true;");
+
             // Carregar uma página HTML com a foto
-            await _webViewController.loadHtmlString('''
+            final String photoHtml = '''
               <!DOCTYPE html>
               <html>
                 <head>
                   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <title>Foto Capturada</title>
+                  <script>
+                    // Desabilitar diagnósticos antes que a página carregue
+                    window.disableDiagnostics = true;
+                  </script>
                   <style>
                     body { 
                       margin: 0; 
@@ -1231,24 +1459,66 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
                     <h3>Foto Capturada</h3>
                     <img src="data:image/jpeg;base64,$base64Image" class="preview-image" alt="Preview">
                   </div>
+                  <script>
+                    // Garantir que diagnósticos permanecem desativados
+                    window.disableDiagnostics = true;
+                  </script>
                 </body>
               </html>
-            ''');
+            ''';
+
+            await _webViewController.loadHtmlString(photoHtml);
+
+            // Verificar novamente para garantir que a flag está ativa
+            await Future.delayed(const Duration(milliseconds: 500));
+            await _webViewController
+                .runJavaScript("window.disableDiagnostics = true;");
           }
         } catch (e) {
           _logError('Erro ao processar imagem: $e');
           _showError('Erro ao processar imagem: $e');
         }
       }
+
+      // Manter diagnósticos desativados por um tempo razoável
+      await Future.delayed(const Duration(seconds: 2));
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      } catch (e) {
+        debugPrint('Erro ao desabilitar diagnósticos no final: $e');
+      }
+
+      // Reativar health check após um tempo suficiente
+      Future.delayed(const Duration(seconds: 10), () {
+        if (mounted) {
+          _startPeriodicHealthCheck();
+        }
+      });
     } catch (e, stackTrace) {
       await Sentry.captureException(e, stackTrace: stackTrace);
       _showError('Erro ao tirar foto ou escanear QR Code: $e');
+
+      // Reativar health check após erro, mas com delay
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted) {
+          _startPeriodicHealthCheck();
+        }
+      });
     }
   }
 
   // Função auxiliar para carregar URLs com segurança
   Future<void> _loadUrlSafely(String url) async {
     try {
+      // Desabilitar temporariamente o health check durante a navegação
+      _healthCheckTimer?.cancel();
+
+      // Injetar script para desabilitar diagnósticos durante a navegação
+      await _webViewController
+          .runJavaScript("window.disableDiagnostics = true;");
+
+      // Carregar a URL
       await _webViewController.loadRequest(Uri.parse(url));
 
       // Verificar se a página carregou corretamente depois de um curto intervalo
@@ -1257,16 +1527,38 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         if (document.body) {
           document.body.style.backgroundColor = "white";
           console.log("Página carregada e cor de fundo definida");
+          
+          // Ativar diagnósticos quando a página estiver carregada corretamente
+          window.disableDiagnostics = false;
         } else {
           console.error("Corpo do documento não encontrado");
         }
       ''');
+
+      // Reativar o health check após um tempo adequado para a página carregar completamente
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) {
+          _startPeriodicHealthCheck();
+        }
+      });
     } catch (e) {
       _logError('Erro ao carregar URL: $e');
 
       // Tenta recarregar a página em caso de erro
       try {
         await _webViewController.reload();
+
+        // Reativar diagnósticos após erro
+        await Future.delayed(const Duration(seconds: 1));
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = false;");
+
+        // Reativar health check
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) {
+            _startPeriodicHealthCheck();
+          }
+        });
       } catch (reloadError) {
         _logError('Erro ao tentar recarregar: $reloadError');
       }
@@ -1748,6 +2040,17 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         return;
       }
 
+      // Desabilitar health check durante o uso da câmera
+      _healthCheckTimer?.cancel();
+
+      // Desabilitar diagnósticos na página atual
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      } catch (e) {
+        debugPrint('Erro ao desabilitar diagnósticos: $e');
+      }
+
       // Limpar recursos e estado antes de abrir a câmera
       await _disposeResourcesBeforeCamera();
       debugPrint('Recursos limpos, preparando para abrir câmera...');
@@ -1817,6 +2120,20 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         if (cameraErrorOccurred.toString() == 'true') {
           _markReceiverResetRequired();
         }
+
+        // Reativar health check com delay para garantir que a página está estável
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) {
+            try {
+              _webViewController
+                  .runJavaScript("window.disableDiagnostics = false;");
+              _startPeriodicHealthCheck();
+            } catch (e) {
+              debugPrint('Erro ao reativar diagnósticos: $e');
+            }
+          }
+        });
+
         return;
       }
 
@@ -1824,6 +2141,15 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       final String data = result['data'];
 
       debugPrint('Processando resultado: tipo=$type, data=$data');
+
+      // Manter diagnósticos desabilitados durante o processamento
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      } catch (e) {
+        debugPrint(
+            'Erro ao desabilitar diagnósticos durante processamento: $e');
+      }
 
       if (type == 'qrcode') {
         // Processar QR code detectado
@@ -1837,6 +2163,8 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         // Processar foto tirada
         await _processSelectedImage(data, 'camera_file_input');
       }
+
+      // Os diagnósticos serão reativados dentro de _processSelectedImage ou _loadUrlSafely
     } catch (e, stackTrace) {
       debugPrint('Erro ao mostrar câmera: $e');
       _logError('Erro ao mostrar câmera: $e');
@@ -1850,6 +2178,19 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         await Sentry.captureException(e, stackTrace: stackTrace);
         _showError('Não foi possível acessar a câmera: $e');
       }
+
+      // Reativar health check após erro
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) {
+          try {
+            _webViewController
+                .runJavaScript("window.disableDiagnostics = false;");
+            _startPeriodicHealthCheck();
+          } catch (e) {
+            debugPrint('Erro ao reativar diagnósticos após erro: $e');
+          }
+        }
+      });
     }
   }
 
@@ -1947,6 +2288,15 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     try {
       debugPrint('Processando QR code: $qrData');
 
+      // Desabilitar diagnósticos durante o processamento do QR code
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      } catch (e) {
+        debugPrint(
+            'Erro ao desabilitar diagnósticos durante processamento QR: $e');
+      }
+
       // Enviar para o servidor
       final uri = Uri.parse(apiUrl);
       final response = await http.post(
@@ -1984,13 +2334,36 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             window.lastScannedQRCode = '$qrData';
             
             console.log('QR code processado e enviado para o WebView: $qrData');
+            
+            // Reativar diagnósticos após processamento
+            window.disableDiagnostics = false;
           })();
         ''');
+
+        // Reativar health check
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) {
+            _startPeriodicHealthCheck();
+          }
+        });
       }
     } catch (e, stackTrace) {
       _logError('Erro ao processar QR code: $e');
       await Sentry.captureException(e, stackTrace: stackTrace);
       _showError('Erro ao processar QR code: $e');
+
+      // Reativar diagnósticos após erro
+      try {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = false;");
+
+        // Reativar health check
+        if (mounted) {
+          _startPeriodicHealthCheck();
+        }
+      } catch (e) {
+        debugPrint('Erro ao reativar diagnósticos após erro: $e');
+      }
     }
   }
 
@@ -2157,7 +2530,32 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
 
   void _startQRCodeReadingWithTimeout() async {
     await _resetCameraState(); // Resetar o estado da câmera antes de abrir
-    _showCameraModal();
+
+    // Desabilitar health check durante o uso da câmera
+    _healthCheckTimer?.cancel();
+
+    // Desabilitar diagnósticos na página atual
+    try {
+      await _webViewController
+          .runJavaScript("window.disableDiagnostics = true;");
+    } catch (e) {
+      debugPrint('Erro ao desabilitar diagnósticos: $e');
+    }
+
+    await _showCameraModal();
+
+    // Reativar health check após uso da câmera (com delay para garantir que a página está carregada)
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) {
+        try {
+          _webViewController
+              .runJavaScript("window.disableDiagnostics = false;");
+          _startPeriodicHealthCheck();
+        } catch (e) {
+          debugPrint('Erro ao reativar diagnósticos: $e');
+        }
+      }
+    });
   }
 
   // Adicionar função para testar o Sentry
