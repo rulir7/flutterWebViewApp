@@ -18,6 +18,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:http_parser/http_parser.dart';
+import './ios_utils.dart';
 
 // URL para enviar dados
 const String apiUrl = 'http://rulir.ddns.net:3003/api/upload';
@@ -484,9 +485,435 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         debugPrint(
             'Orientação mudou para: ${isLandscape ? "paisagem" : "retrato"}');
 
+ 
+      // Criamos um diagnóstico básico que funciona em qualquer página
+      final basicScript = '''
+        (function() {
+          try {
+            return JSON.stringify({
+              url: document.location.href || '',
+              userAgent: navigator.userAgent || '',
+              pageTitle: document.title || '',
+              domState: document.readyState || '',
+              timestamp: new Date().toISOString(),
+              isSecure: window.location.protocol === 'https:',
+              screenWidth: window.innerWidth,
+              screenHeight: window.innerHeight
+            });
+          } catch (e) {
+            return JSON.stringify({
+              error: e.toString(),
+              errorType: 'basic_diagnostics_error'
+            });
+          }
+        })();
+      ''';
+
+      // Se não estivermos em uma página vazia, adicione verificações avançadas
+      final advancedScript = '''
+        (function() {
+          try {
+            var hasLocalStorage = false;
+            var hasSessionStorage = false;
+            var hasCookies = false;
+            var hasIndexedDB = false;
+            
+            try { 
+              hasLocalStorage = !!window.localStorage; 
+            } catch(e) {}
+            
+            try { 
+              hasSessionStorage = !!window.sessionStorage; 
+            } catch(e) {}
+            
+            try { 
+              hasCookies = navigator.cookieEnabled; 
+            } catch(e) {}
+            
+            try { 
+              hasIndexedDB = !!window.indexedDB; 
+            } catch(e) {}
+            
+            return JSON.stringify({
+              hasLocalStorage: hasLocalStorage,
+              hasSessionStorage: hasSessionStorage,
+              hasCookies: hasCookies,
+              hasIndexedDB: hasIndexedDB,
+              isOnline: navigator.onLine,
+              hasServiceWorker: 'serviceWorker' in navigator
+            });
+          } catch (e) {
+            return JSON.stringify({
+              error: e.toString(),
+              errorType: 'advanced_diagnostics_error'
+            });
+          }
+        })();
+      ''';
+
+      // Executar diagnóstico básico
+      Map<String, dynamic> diagnostics = {};
+      try {
+        final basicResult =
+            await _webViewController.runJavaScriptReturningResult(basicScript);
+
+        // Processar resultado básico
+        if (basicResult != null) {
+          final String basicJson = basicResult.toString();
+
+          if (basicJson != "null" && basicJson.isNotEmpty) {
+            try {
+              diagnostics = Map<String, dynamic>.from(jsonDecode(basicJson));
+              debugPrint('Diagnóstico básico WebView: $basicJson');
+            } catch (e) {
+              debugPrint('Erro ao decodificar diagnóstico básico: $e');
+              // Se não conseguimos processar o básico, desistimos
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Erro ao executar diagnóstico básico: $e');
+        return;
+      }
+
+      // Se diagnostics está vazio, não continuar
+      if (diagnostics.isEmpty) {
+        Logger.warning('Não foi possível obter diagnósticos básicos do WebView',
+            category: 'webview.diagnostics');
+        return;
+      }
+
+      // Se não estamos em about:blank, executar diagnóstico avançado
+      try {
+        final advancedResult = await _webViewController
+            .runJavaScriptReturningResult(advancedScript);
+
+        if (advancedResult != null) {
+          final String advancedJson = advancedResult.toString();
+
+          if (advancedJson != "null" && advancedJson.isNotEmpty) {
+            try {
+              final Map<String, dynamic> advancedData =
+                  Map<String, dynamic>.from(jsonDecode(advancedJson));
+
+              // Mesclar dados avançados com o diagnóstico básico
+              diagnostics.addAll(advancedData);
+              debugPrint('Diagnóstico avançado WebView: $advancedJson');
+            } catch (e) {
+              debugPrint('Erro ao decodificar diagnóstico avançado: $e');
+              // Podemos continuar apenas com o básico
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Erro ao executar diagnóstico avançado: $e');
+        // Podemos continuar apenas com o básico
+      }
+
+      // Adicionar informações sobre a página
+      diagnostics['isEmptyPage'] = isEmptyPage;
+      diagnostics['pageType'] = isEmptyPage ? 'empty' : 'content';
+
+      // Log de sucesso - enviar sem try/catch para não mascarar erros de diagnóstico
+      // que estamos tentando consertar
+      Logger.info('Diagnóstico do WebView concluído',
+          category: 'webview.diagnostics', extra: diagnostics);
+    } catch (e, stackTrace) {
+      // Evitar enviar exceção para o Sentry para não criar loop
+      debugPrint('⚠️ Erro ao realizar diagnóstico do WebView: $e');
+
+      // Apenas registrar como warning, sem tentar capturar exceção
+      Logger.warning('Erro ao realizar diagnóstico do WebView: $e',
+          category: 'webview', extra: {'errorDetails': e.toString()});
+    }
+  }
+
+  Future<void> _requestPermissions() async {
+    await [
+      Permission.camera,
+      Permission.storage,
+    ].request();
+  }
+
+  Future<bool> _checkPermissions() async {
+    var cameraStatus = await Permission.camera.status;
+
+    if (!cameraStatus.isGranted) {
+      var results = [
+        Permission.camera.request(),
+      ];
+
+      if ((await Future.wait(results)).every((status) => status.isGranted)) {
+        return true;
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Permissões de câmera são necessárias.')),
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Função para processar mensagens recebidas do JavaScript
+  void _processJavaScriptMessage(String message) {
+    try {
+      // Tenta interpretar a mensagem como JSON
+      final Map<String, dynamic> data = jsonDecode(message);
+
+      // Verificar se é uma interceptação de input file
+      if (data['type'] == 'fileInputIntercepted') {
+        _handleFileInputIntercepted(data);
+      } else {
+        debugPrint('Mensagem não reconhecida: $message');
+      }
+    } catch (e) {
+      // Se não for JSON, trata como mensagem de texto simples
+      debugPrint('Mensagem de texto do JavaScript: $message');
+    }
+  }
+
+  // Manipula a interceptação de um input file
+  void _handleFileInputIntercepted(Map<String, dynamic> data) {
+    debugPrint('Input file interceptado: $data');
+
+    // Obter informações do input
+    final String inputId = data['inputId'] ?? '';
+    final String accept = data['accept'] ?? '*/*';
+    final String capture = data['capture'] ?? '';
+
+    // Verificar se deve usar a câmera com base no atributo "capture"
+    final bool useCamera = capture == 'environment' || capture == 'camera';
+
+    // Verificar se o accept inclui imagens
+    final bool acceptImages = accept.contains('image') || accept == '*/*';
+
+    if (acceptImages && useCamera) {
+      // Abrir câmera para captura de foto ou QR code
+      _scanQRCodeOrTakePicture(inputId: inputId);
+    } else {
+      // Opção para escolher arquivo da galeria
+      _pickFileFromGallery(inputId: inputId);
+    }
+  }
+
+  // Função para selecionar arquivo da galeria
+  Future<void> _pickFileFromGallery({required String inputId}) async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+
+      if (image != null) {
+        // Processar a imagem selecionada
+        await _processSelectedImage(image.path, inputId);
+      }
+    } catch (e, stackTrace) {
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _showError('Erro ao selecionar imagem: $e');
+    }
+  }
+
+  // Função para processar uma imagem selecionada
+  Future<void> _processSelectedImage(String imagePath, String inputId) async {
+    try {
+      debugPrint('Processando imagem: $imagePath');
+
+      // Cancelar qualquer verificação de saúde atual para evitar diagnósticos durante o processamento
+      _healthCheckTimer?.cancel();
+
+      // Verificar se o arquivo existe
+      final file = File(imagePath);
+      if (!await file.exists()) {
+        debugPrint('Arquivo de imagem não existe: $imagePath');
+        throw Exception('Arquivo de imagem não encontrado');
+      }
+
+      // Otimizações específicas para iOS
+      bool isIOS = Platform.isIOS;
+      if (isIOS) {
+        // Em dispositivos iOS, podemos enfrentar problemas de memória com imagens grandes
+        try {
+          // Verificar o tamanho do arquivo
+          final fileSize = await file.length();
+          final fileSizeMB = fileSize / (1024 * 1024);
+          debugPrint(
+              '📊 Tamanho do arquivo iOS: ${fileSizeMB.toStringAsFixed(2)} MB');
+
+          // Se o arquivo for muito grande, comprimir antes de processar
+          if (fileSizeMB > 5.0) {
+            // Mais de 5MB
+            debugPrint(
+                '⚠️ Arquivo grande detectado no iOS, aplicando otimizações...');
+            // Comprimir a imagem antes de converter para base64
+            final compressedBytes =
+                await compressAndResizeImage(file, forceHighCompression: true);
+            // Converter para base64 usando a imagem comprimida
+            final base64Image = base64Encode(compressedBytes);
+
+            // Liberar recursos de memória no iOS
+            if (isIOS) {
+              await IOSUtils.releaseSystemResources();
+            }
+
+            // Continuar o processamento com a imagem otimizada
+            await _continueImageProcessing(base64Image, imagePath, inputId);
+            return;
+          }
+        } catch (e) {
+          debugPrint('⚠️ Erro durante otimização iOS: $e');
+          // Continuar com o fluxo normal se a otimização falhar
+        }
+      }
+
+      // Converter para base64 - fluxo normal para arquivos de tamanho razoável
+      final List<int> imageBytes = await file.readAsBytes();
+      final String base64Image = base64Encode(imageBytes);
+
+      // Continuar o processamento normal
+      await _continueImageProcessing(base64Image, imagePath, inputId);
+    } catch (e, stackTrace) {
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _showError('Erro ao processar imagem: $e');
+    }
+  }
+
+  // Método auxiliar para continuar o processamento da imagem após otimizações
+  Future<void> _continueImageProcessing(
+      String base64Image, String imagePath, String inputId) async {
+    try {
+      // Tentar detectar QR code na imagem de forma transparente
+      String? qrCode;
+      try {
+        final MobileScannerController controller = MobileScannerController();
+        try {
+          final barcodes = await controller.analyzeImage(imagePath);
+          if (barcodes?.barcodes.isNotEmpty ?? false) {
+            qrCode = barcodes?.barcodes.first.rawValue;
+            debugPrint('✅ QR code detectado na imagem: $qrCode');
+          } else {
+            debugPrint('ℹ️ Nenhum QR code detectado na imagem');
+          }
+        } finally {
+          await controller.dispose();
+        }
+      } catch (e) {
+        debugPrint('⚠️ Erro ao tentar detectar QR code: $e');
+      }
+
+      // O código HTML para exibir a imagem
+      final String photoHtml = '''
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Foto Capturada</title>
+            <script>
+              // Garantir que diagnósticos estão desativados (definido antes do corpo da página)
+              window.disableDiagnostics = true;
+              
+              // Informe à página pai que os diagnósticos devem ser desativados
+              try {
+                if (window.parent) {
+                  window.parent.disableDiagnostics = true;
+                }
+              } catch(e) {}
+            </script>
+            <style>
+              body { 
+                margin: 0; 
+                padding: 20px;
+                background-color: white;
+                font-family: Arial, sans-serif;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+              }
+              .preview-container {
+                width: 100%;
+                max-width: 400px;
+                margin: 0 auto;
+                text-align: center;
+              }
+              .preview-image {
+                width: 100%;
+                max-height: 300px;
+                object-fit: contain;
+                border-radius: 8px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+              }
+              h3 {
+                color: #333;
+                margin-bottom: 20px;
+              }
+              .qr-info {
+                margin-top: 20px;
+                padding: 15px;
+                background-color: #e3f2fd;
+                border-radius: 8px;
+                border-left: 4px solid #2196F3;
+                display: ${qrCode != null ? 'block' : 'none'};
+              }
+            </style>
+          </head>
+          <body>
+            <div class="preview-container">
+              <h3>Foto Capturada</h3>
+              <img src="data:image/jpeg;base64,$base64Image" class="preview-image" alt="Preview">
+              <div class="qr-info">
+                <h4>QR Code detectado:</h4>
+                <p>${qrCode ?? ''}</p>
+              </div>
+            </div>
+            <script>
+              // Desabilitar diagnósticos novamente para ter certeza
+              window.disableDiagnostics = true;
+              
+              // Bloqueamos explicitamente diagnósticos
+              window.addEventListener('load', function() {
+                // Garantir que diagnósticos estão desativados mesmo após carregamento
+                window.disableDiagnostics = true;
+                
+                // Se tiver QR code com URL, redirecionar após 1 segundo
+                ${qrCode != null && (qrCode.startsWith('http://') || qrCode.startsWith('https://')) ? '''
+                  setTimeout(function() {
+                    window.location.href = "$qrCode";
+                  }, 1000);
+                ''' : ''}
+              });
+            </script>
+          </body>
+        </html>
+      ''';
+
+      // Assegurar que diagnósticos estão realmente desabilitados
+      await _webViewController
+          .runJavaScript("window.disableDiagnostics = true;");
+
+      // Sempre mostrar a imagem capturada em uma página HTML
+      await _webViewController.loadHtmlString(photoHtml);
+
+      // Verificar novamente para garantir que a flag está ativa
+      await Future.delayed(const Duration(milliseconds: 500));
+      await _webViewController
+          .runJavaScript("window.disableDiagnostics = true;");
+
+      // Desabilitar temporariamente o health check quando mostramos uma imagem sem QR code
+      if (qrCode == null) {
+        // Cancelar o timer de health check atual
+        _healthCheckTimer?.cancel();
+
+        // Reativar o timer após tempo suficiente (aumentado para 10 segundos) após a página estar completamente carregada
+        Future.delayed(const Duration(seconds: 10), () {
+          if (mounted) {
+            _startPeriodicHealthCheck();
+          }
+
         // Podemos ajustar elementos da UI conforme a orientação
         setState(() {
           _isLandscapeMode = isLandscape;
+ main
         });
       },
     );
@@ -1366,3 +1793,89 @@ class QRViewExample extends StatelessWidget {
     );
   }
 }
+ fix-ios-compatibility
+
+// Função para comprimir e redimensionar a imagem
+// Implementa o algoritmo de redimensionamento similar ao fornecido no código TypeScript:
+// - Largura máxima de 1280px
+// - Mantém a proporção da imagem original
+// - Aplica interpolação linear para melhor qualidade
+Future<Uint8List> compressAndResizeImage(File imageFile,
+    {bool forceHighCompression = false}) async {
+  try {
+    // Carregar a imagem
+    final Uint8List imageBytes = await imageFile.readAsBytes();
+
+    // Verificar se temos bytes da imagem
+    if (imageBytes.isEmpty) {
+      throw Exception('Arquivo de imagem vazio');
+    }
+
+    // Decodificar a imagem
+    final img.Image? image = img.decodeImage(imageBytes);
+    if (image == null) throw Exception('Não foi possível decodificar a imagem');
+
+    // Calcular nova largura e altura mantendo proporção
+    int targetWidth = image.width > 1280 ? 1280 : image.width;
+    int targetHeight = (targetWidth * image.height) ~/ image.width;
+
+    // Se forçar alta compressão para iOS, usar dimensões menores
+    if (forceHighCompression && Platform.isIOS) {
+      targetWidth = targetWidth ~/ 1.5; // Reduz 33% a mais na largura
+      targetHeight = targetHeight ~/ 1.5; // Reduz 33% a mais na altura
+      debugPrint(
+          '📊 Aplicando compressão extra para iOS: ${targetWidth}x${targetHeight}');
+    }
+
+    Logger.info('Redimensionando imagem:',
+        extra: {
+          'largura_original': image.width,
+          'altura_original': image.height,
+          'nova_largura': targetWidth,
+          'nova_altura': targetHeight,
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android',
+          'compressao_extra': forceHighCompression
+        },
+        category: 'image_processing');
+
+    // Redimensionar a imagem
+    final img.Image resizedImage = img.copyResize(image,
+        width: targetWidth,
+        height: targetHeight,
+        interpolation: img.Interpolation.linear);
+
+    // Converter para JPEG com boa qualidade (WebP não é suportado diretamente)
+    // Qualidade de 85% oferece bom equilíbrio entre tamanho e qualidade
+    // Em iOS com problemas de memória, usar qualidade mais baixa se necessário
+    final quality = (forceHighCompression && Platform.isIOS) ? 70 : 85;
+    final compressedBytes = img.encodeJpg(resizedImage, quality: quality);
+
+    // Registrar métricas de compressão
+    final compressionRatio = compressedBytes.length * 100 / imageBytes.length;
+    final reductionPercent = 100 - compressionRatio;
+
+    Logger.info('Imagem comprimida:',
+        extra: {
+          'tamanho_bytes_original': imageBytes.length,
+          'tamanho_bytes_final': compressedBytes.length,
+          'redução': '${reductionPercent.toStringAsFixed(2)}%',
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android',
+          'qualidade': quality
+        },
+        category: 'image_processing');
+
+    return Uint8List.fromList(compressedBytes);
+  } catch (e, stackTrace) {
+    // Capturar e logar qualquer erro durante o processamento da imagem
+    Logger.error('Erro ao comprimir e redimensionar imagem: $e',
+        extra: {
+          'caminho_arquivo': imageFile.path,
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+        },
+        category: 'image_processing');
+
+    // Re-lançar exceção para ser tratada no chamador
+    throw Exception('Falha ao processar imagem: $e');
+  }
+}
+
