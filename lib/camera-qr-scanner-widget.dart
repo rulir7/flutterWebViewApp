@@ -8,7 +8,6 @@ import 'package:camera/camera.dart';
 import 'dart:typed_data';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
-import './logger.dart'; // Importando a classe Logger
 
 class CameraWithQRScanner extends StatefulWidget {
   final Function(String) onQRCodeDetected;
@@ -44,8 +43,6 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
   int _previewRetryCount = 0;
   bool _isQRScannerReady = false;
   bool _initialResetPerformed = false;
-  String? _errorMessage;
-  bool _isInitializing = false;
 
   // Controle de segurança para receivers
   bool _hasTooManyReceiversError = false;
@@ -61,10 +58,6 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
 
   // Singleton para garantir que apenas uma instância seja criada
   static bool _isInstanceActive = false;
-
-  // Variáveis de estado (removidas para evitar duplicação)
-  Timer? _autoRetryTimer;
-  int _retryCount = 0;
 
   @override
   void initState() {
@@ -195,12 +188,11 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
     } catch (e, stackTrace) {
       debugPrint('❌ Erro ao inicializar câmera: $e');
 
-      // Registrar no Logger em vez do Sentry diretamente
-      await Logger.captureException(
+      // Registrar no Sentry
+      await Sentry.captureException(
         e,
         stackTrace: stackTrace,
-        category: 'camera_init',
-        extra: {'init_attempts': _initAttempts},
+        hint: {'info': 'Erro na inicialização da câmera'} as Hint,
       );
 
       // Verificar se é um erro de Too many receivers
@@ -535,70 +527,39 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
 
   @override
   Widget build(BuildContext context) {
-    final bool isQrMode = _isQRMode;
-    final bool isLandscape =
-        MediaQuery.of(context).orientation == Orientation.landscape;
-    final Size screenSize = MediaQuery.of(context).size;
-    final EdgeInsets safeAreaInsets = MediaQuery.of(context).padding;
-
-    // Determinar a proporção do preview, considerando a orientação
-    // Para iOS, a proporção pode ser diferente dependendo do dispositivo
-    double aspectRatio;
-    if (Platform.isIOS) {
-      // No iOS, necessário ajustar o aspect ratio para diferentes dispositivos
-      if (isLandscape) {
-        aspectRatio = screenSize.width / screenSize.height;
-      } else {
-        aspectRatio = screenSize.height / screenSize.width;
-      }
-    } else {
-      // Android segue a proporção padrão
-      aspectRatio = isLandscape ? 4 / 3 : 3 / 4;
-    }
+    // Resetar timer de inatividade sempre que o usuário interagir
+    _resetInactivityTimer();
 
     return WillPopScope(
+      // Interceptar o botão de voltar para garantir a limpeza de recursos
       onWillPop: () async {
-        // Garantir que os recursos são liberados corretamente
-        await _forceReleaseAllCameraResources();
+        // Limpar recursos antes de sair
+        await _safeDisposeControllersCompletely();
         return true;
       },
       child: Scaffold(
         backgroundColor: Colors.black,
         appBar: AppBar(
-          backgroundColor: Colors.black,
-          foregroundColor: Colors.white,
-          // iOS: Ajustar estilo da AppBar para design iOS
-          elevation: Platform.isIOS ? 0 : 4,
-          title: Text(
-            isQrMode ? 'Escanear QR Code' : 'Tirar Foto',
-            style: const TextStyle(color: Colors.white),
+          backgroundColor: Colors.transparent,
+          title: Text(_hasTooManyReceiversError
+              ? 'Erro - Reinicie o Aplicativo'
+              : 'Tirar Foto'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () async {
+              // Limpar recursos antes de sair
+              await _safeDisposeControllersCompletely();
+              Navigator.pop(context);
+            },
           ),
-          actions: [
-            if (_cameraController != null &&
-                _cameraController!.value.isInitialized)
-              IconButton(
-                icon: Icon(isQrMode ? Icons.camera_alt : Icons.qr_code),
-                onPressed: _isProcessing ? null : _toggleMode,
-                tooltip: isQrMode
-                    ? 'Mudar para modo de foto'
-                    : 'Mudar para modo de QR code',
-              ),
-          ],
         ),
-        // iOS: Usar SafeArea para adaptar à tela com notch
-        body: SafeArea(
-          // Para iOS, o bottom safe area é relevante especialmente para iPhone X+
-          bottom: true,
-          child: _buildBody(isQrMode, isLandscape, screenSize, aspectRatio),
-        ),
-        bottomNavigationBar: _buildBottomBar(isQrMode),
+        body: _buildBody(),
       ),
     );
   }
 
   // Método para construir o corpo baseado no estado atual
-  Widget _buildBody(
-      bool isQrMode, bool isLandscape, Size screenSize, double aspectRatio) {
+  Widget _buildBody() {
     // Verificar se há erro de excesso de receivers
     if (_hasTooManyReceiversError) {
       return Center(
@@ -785,7 +746,6 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
     }
 
     setState(() => _isProcessing = true);
-    String? imagePath;
 
     try {
       // Feedback tátil
@@ -793,7 +753,7 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
 
       // Capturar foto
       final XFile photo = await _cameraController!.takePicture();
-      imagePath = photo.path;
+      final String imagePath = photo.path;
 
       debugPrint('📸 Foto capturada: $imagePath');
 
@@ -824,12 +784,11 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
     } catch (e, stackTrace) {
       debugPrint('❌ Erro ao capturar foto: $e');
 
-      // Registrar no Logger em vez do Sentry diretamente
-      await Logger.captureException(
+      // Registrar no Sentry
+      await Sentry.captureException(
         e,
         stackTrace: stackTrace,
-        category: 'photo_capture',
-        extra: {'image_path': imagePath},
+        hint: {'info': 'Erro ao capturar foto'} as Hint,
       );
 
       if (mounted) {
@@ -907,265 +866,5 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
         }
       });
     }
-  }
-
-  // Método para liberar todos os recursos de câmera de forma agressiva - adaptado para iOS
-  Future<void> _forceReleaseAllCameraResources() async {
-    debugPrint('🧨 Forçando liberação de TODOS os recursos de câmera...');
-
-    // Cancelar timer
-    _inactivityTimer?.cancel();
-    _inactivityTimer = null;
-
-    // Cancelar timer de retry se existir
-    _autoRetryTimer?.cancel();
-    _autoRetryTimer = null;
-
-    // Liberar scanner QR
-    if (_qrController != null) {
-      try {
-        debugPrint('🧹 Liberando scanner QR...');
-        await _qrController!.stop();
-        await _qrController!.dispose();
-      } catch (e) {
-        debugPrint('⚠️ Erro ao liberar scanner QR: $e');
-      } finally {
-        _qrController = null;
-      }
-    }
-
-    // Liberar controller de câmera - tratamento específico por plataforma
-    if (_cameraController != null) {
-      try {
-        debugPrint('🧹 Liberando controller de câmera...');
-
-        try {
-          if (_cameraController!.value.isInitialized) {
-            try {
-              // Primeiro tentar parar qualquer processamento atual
-              await _cameraController!.stopImageStream().catchError((e) {
-                debugPrint('⚠️ Erro ao parar stream: $e');
-              });
-
-              // No iOS, garantir que a orientação está desbloqueada
-              if (Platform.isIOS) {
-                try {
-                  await _cameraController!.unlockCaptureOrientation();
-                } catch (e) {
-                  debugPrint('⚠️ Erro ao desbloquear orientação no iOS: $e');
-                }
-              }
-            } catch (e) {
-              debugPrint('⚠️ Erro ao parar stream: $e');
-            }
-          }
-        } catch (e) {
-          debugPrint('⚠️ Erro ao verificar estado da câmera: $e');
-        }
-
-        try {
-          await _cameraController!.dispose();
-        } catch (e) {
-          debugPrint('⚠️ Erro ao liberar controller: $e');
-        }
-      } catch (e) {
-        debugPrint('⚠️ Erro geral ao liberar câmera: $e');
-      } finally {
-        _cameraController = null;
-      }
-    }
-
-    // Liberar recursos do sistema conforme a plataforma
-    if (Platform.isAndroid) {
-      try {
-        // Usar múltiplos métodos para garantir liberação
-        debugPrint('🧹 Forçando liberação de recursos do sistema (Android)...');
-        await SystemChannels.platform
-            .invokeMethod<void>('SystemNavigator.routeUpdated');
-
-        try {
-          // Tentar método alternativo (SystemSound é leve mas causa um ciclo de GC)
-          await SystemChannels.platform.invokeMethod<void>(
-              'SystemSound.play', SystemSoundType.click.index);
-        } catch (e) {
-          debugPrint('⚠️ Erro no método alternativo: $e');
-        }
-
-        // Pequena pausa para dar tempo ao sistema
-        await Future.delayed(const Duration(milliseconds: 300));
-      } catch (e) {
-        debugPrint('⚠️ Erro ao liberar recursos do sistema: $e');
-      }
-    } else if (Platform.isIOS) {
-      try {
-        // Abordagem específica para iOS
-        debugPrint('🧹 Liberando recursos no iOS...');
-
-        // No iOS, uma pausa simples pode ser suficiente
-        await Future.delayed(const Duration(milliseconds: 500));
-
-        // Forçar GC no iOS (embora não tenhamos controle direto sobre isso)
-        SystemChannels.platform.invokeMethod<void>('System.gc').catchError((e) {
-          // Ignorar erro - este método pode não estar disponível
-        });
-      } catch (e) {
-        debugPrint('⚠️ Erro ao liberar recursos no iOS: $e');
-      }
-    }
-
-    debugPrint('✅ Processo de liberação forçada concluído');
-  }
-
-  // Método para alternar entre modo QR e modo câmera
-  void _toggleMode() {
-    if (_isProcessing) return;
-
-    setState(() {
-      _isProcessing = true;
-    });
-
-    // Modo atual
-    final bool wasInQrMode = _isQRMode;
-
-    // Primeiro, libere os controladores atuais
-    _forceReleaseAllCameraResources().then((_) {
-      if (wasInQrMode) {
-        // Mudando para modo câmera
-        _ensureCameraInitialized().then((_) {
-          if (mounted) {
-            setState(() {
-              _isQRMode = false;
-              _isProcessing = false;
-            });
-          }
-          _resetInactivityTimer();
-        }).catchError((e) {
-          debugPrint('❌ Erro ao inicializar câmera: $e');
-          if (mounted) {
-            setState(() {
-              _isProcessing = false;
-              _errorMessage = 'Não foi possível iniciar a câmera';
-            });
-            _showError('Não foi possível iniciar a câmera');
-          }
-        });
-      } else {
-        // Mudando para modo QR
-        _ensureQRScannerInitialized().then((_) {
-          if (mounted) {
-            setState(() {
-              _isQRMode = true;
-              _isProcessing = false;
-            });
-          }
-          _resetInactivityTimer();
-        }).catchError((e) {
-          debugPrint('❌ Erro ao inicializar scanner QR: $e');
-          if (mounted) {
-            setState(() {
-              _isProcessing = false;
-              _errorMessage = 'Não foi possível iniciar o scanner de QR code';
-            });
-            _showError('Não foi possível iniciar o scanner de QR code');
-          }
-        });
-      }
-    });
-  }
-
-  // Método para garantir que a câmera seja inicializada
-  Future<void> _ensureCameraInitialized() async {
-    if (_isCameraInitialized && _cameraController != null) {
-      return;
-    }
-
-    await _initializeCamera();
-
-    if (!_isCameraInitialized) {
-      throw Exception('Não foi possível inicializar a câmera');
-    }
-  }
-
-  // Método para garantir que o scanner QR esteja inicializado
-  Future<void> _ensureQRScannerInitialized() async {
-    if (_isQRScannerReady && _qrController != null) {
-      return;
-    }
-
-    try {
-      // Verificar permissões de câmera
-      await _checkCameraPermissions();
-
-      // Criar controlador do QR scanner
-      _qrController = MobileScannerController(
-        detectionSpeed: DetectionSpeed.normal,
-        facing: CameraFacing.back,
-      );
-
-      // Iniciar scanner
-      await _qrController!.start();
-
-      // Sinalizar que o scanner está pronto
-      _isQRScannerReady = true;
-
-      debugPrint('✅ Scanner QR inicializado com sucesso');
-    } catch (e) {
-      debugPrint('❌ Erro ao inicializar scanner QR: $e');
-      _isQRScannerReady = false;
-      rethrow;
-    }
-  }
-
-  // Método para capturar foto
-  void _onCaptureButtonPressed() {
-    if (_isProcessing) return;
-    _takePicture();
-  }
-
-  // Método para construir a barra inferior
-  Widget _buildBottomBar(bool isQrMode) {
-    // Se a câmera não estiver inicializada ou houver erro, não mostrar a barra
-    if (_cameraController == null ||
-        !_cameraController!.value.isInitialized ||
-        _errorMessage != null ||
-        _isInitializing) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      height: 100,
-      color: Colors.black,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          // No modo QR, mostrar apenas informação
-          if (isQrMode)
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  'Aponte a câmera para um QR code para escaneá-lo automaticamente',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 14,
-                  ),
-                ),
-              ),
-            )
-          else
-            // No modo de foto, mostrar botão de captura
-            IconButton(
-              icon: const Icon(
-                Icons.camera,
-                color: Colors.white,
-                size: 64,
-              ),
-              onPressed: _isProcessing ? null : _onCaptureButtonPressed,
-              tooltip: 'Tirar Foto',
-            ),
-        ],
-      ),
-    );
   }
 }
