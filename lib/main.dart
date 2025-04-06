@@ -1353,6 +1353,21 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           })();
         ''');
       }
+
+      // Enviar dados para o servidor
+      try {
+        await _uploadFile(imagePath, 'image', qrCode: qrCode);
+      } catch (uploadError, uploadStack) {
+        debugPrint('⚠️ Erro ao enviar arquivo para o servidor: $uploadError');
+        await Sentry.captureException(
+          uploadError,
+          stackTrace: uploadStack,
+          hint: {'info': 'Erro ao fazer upload após processamento de imagem'}
+              as Hint,
+        );
+        _showError(
+            'O arquivo foi processado, mas houve um erro no envio ao servidor: $uploadError');
+      }
     } catch (e, stackTrace) {
       await Sentry.captureException(e, stackTrace: stackTrace);
       _showError('Erro ao processar imagem: $e');
