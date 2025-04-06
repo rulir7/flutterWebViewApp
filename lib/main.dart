@@ -18,6 +18,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:http_parser/http_parser.dart';
+import './ios_utils.dart';
 
 // URL para enviar dados
 const String apiUrl = 'http://rulir.ddns.net:3003/api/upload';
@@ -1097,10 +1098,59 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         throw Exception('Arquivo de imagem não encontrado');
       }
 
-      // Converter para base64
+      // Otimizações específicas para iOS
+      bool isIOS = Platform.isIOS;
+      if (isIOS) {
+        // Em dispositivos iOS, podemos enfrentar problemas de memória com imagens grandes
+        try {
+          // Verificar o tamanho do arquivo
+          final fileSize = await file.length();
+          final fileSizeMB = fileSize / (1024 * 1024);
+          debugPrint(
+              '📊 Tamanho do arquivo iOS: ${fileSizeMB.toStringAsFixed(2)} MB');
+
+          // Se o arquivo for muito grande, comprimir antes de processar
+          if (fileSizeMB > 5.0) {
+            // Mais de 5MB
+            debugPrint(
+                '⚠️ Arquivo grande detectado no iOS, aplicando otimizações...');
+            // Comprimir a imagem antes de converter para base64
+            final compressedBytes =
+                await compressAndResizeImage(file, forceHighCompression: true);
+            // Converter para base64 usando a imagem comprimida
+            final base64Image = base64Encode(compressedBytes);
+
+            // Liberar recursos de memória no iOS
+            if (isIOS) {
+              await IOSUtils.releaseSystemResources();
+            }
+
+            // Continuar o processamento com a imagem otimizada
+            await _continueImageProcessing(base64Image, imagePath, inputId);
+            return;
+          }
+        } catch (e) {
+          debugPrint('⚠️ Erro durante otimização iOS: $e');
+          // Continuar com o fluxo normal se a otimização falhar
+        }
+      }
+
+      // Converter para base64 - fluxo normal para arquivos de tamanho razoável
       final List<int> imageBytes = await file.readAsBytes();
       final String base64Image = base64Encode(imageBytes);
 
+      // Continuar o processamento normal
+      await _continueImageProcessing(base64Image, imagePath, inputId);
+    } catch (e, stackTrace) {
+      await Sentry.captureException(e, stackTrace: stackTrace);
+      _showError('Erro ao processar imagem: $e');
+    }
+  }
+
+  // Método auxiliar para continuar o processamento da imagem após otimizações
+  Future<void> _continueImageProcessing(
+      String base64Image, String imagePath, String inputId) async {
+    try {
       // Tentar detectar QR code na imagem de forma transparente
       String? qrCode;
       try {
@@ -2781,7 +2831,8 @@ class QRViewExample extends StatelessWidget {
 // - Largura máxima de 1280px
 // - Mantém a proporção da imagem original
 // - Aplica interpolação linear para melhor qualidade
-Future<Uint8List> compressAndResizeImage(File imageFile) async {
+Future<Uint8List> compressAndResizeImage(File imageFile,
+    {bool forceHighCompression = false}) async {
   try {
     // Carregar a imagem
     final Uint8List imageBytes = await imageFile.readAsBytes();
@@ -2799,13 +2850,22 @@ Future<Uint8List> compressAndResizeImage(File imageFile) async {
     int targetWidth = image.width > 1280 ? 1280 : image.width;
     int targetHeight = (targetWidth * image.height) ~/ image.width;
 
+    // Se forçar alta compressão para iOS, usar dimensões menores
+    if (forceHighCompression && Platform.isIOS) {
+      targetWidth = targetWidth ~/ 1.5; // Reduz 33% a mais na largura
+      targetHeight = targetHeight ~/ 1.5; // Reduz 33% a mais na altura
+      debugPrint(
+          '📊 Aplicando compressão extra para iOS: ${targetWidth}x${targetHeight}');
+    }
+
     Logger.info('Redimensionando imagem:',
         extra: {
           'largura_original': image.width,
           'altura_original': image.height,
           'nova_largura': targetWidth,
           'nova_altura': targetHeight,
-          'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android',
+          'compressao_extra': forceHighCompression
         },
         category: 'image_processing');
 
@@ -2817,7 +2877,9 @@ Future<Uint8List> compressAndResizeImage(File imageFile) async {
 
     // Converter para JPEG com boa qualidade (WebP não é suportado diretamente)
     // Qualidade de 85% oferece bom equilíbrio entre tamanho e qualidade
-    final compressedBytes = img.encodeJpg(resizedImage, quality: 85);
+    // Em iOS com problemas de memória, usar qualidade mais baixa se necessário
+    final quality = (forceHighCompression && Platform.isIOS) ? 70 : 85;
+    final compressedBytes = img.encodeJpg(resizedImage, quality: quality);
 
     // Registrar métricas de compressão
     final compressionRatio = compressedBytes.length * 100 / imageBytes.length;
@@ -2828,7 +2890,8 @@ Future<Uint8List> compressAndResizeImage(File imageFile) async {
           'tamanho_bytes_original': imageBytes.length,
           'tamanho_bytes_final': compressedBytes.length,
           'redução': '${reductionPercent.toStringAsFixed(2)}%',
-          'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+          'plataforma': Platform.isIOS ? 'iOS' : 'Android',
+          'qualidade': quality
         },
         category: 'image_processing');
 
