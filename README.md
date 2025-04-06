@@ -16,3 +16,4 @@ flutter build apk --debug
 flutter build apk --profile
 
 atualizar
+tentar arrumar
