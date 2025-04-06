@@ -14,6 +14,3 @@ flutter build apk --debug
 # build testar sem debug
 
 flutter build apk --profile
-
-atualizar
-tentar arrumar
