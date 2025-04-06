@@ -389,471 +389,103 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   bool _isProcessCompleted = false;
   File? _capturedImage;
   bool _isShowingImageCapture = false;
+  bool _isLandscapeMode = false;
+  DateTime? _pageLoadStartTime;
+  bool _isProcessing = false;
 
   @override
   void initState() {
     super.initState();
+    _webViewController = WebViewController();
+
+    // Registrar observadores do ciclo de vida
     WidgetsBinding.instance.addObserver(this);
-    _requestPermissions().then((_) {
-      _initializeWebView();
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) {
-          _loadHtmlContent();
-          _startPeriodicHealthCheck();
-        }
-      });
-    });
+
+    // Outras inicializações necessárias
+    _setupWebView();
   }
 
-  void _initializeWebView() {
-    // Cria e configura o WebView com persistência
-    late final PlatformWebViewControllerCreationParams params;
-
-    if (WebViewPlatform.instance is WebKitWebViewPlatform) {
-      params = WebKitWebViewControllerCreationParams(
-        allowsInlineMediaPlayback: true,
-        mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
-      );
-    } else {
-      params = const PlatformWebViewControllerCreationParams();
-    }
-
-    final WebViewController controller =
-        WebViewController.fromPlatformCreationParams(params);
-
-    // Configuração específica para Android
-    if (controller.platform is AndroidWebViewController) {
-      AndroidWebViewController.enableDebugging(true);
-      (controller.platform as AndroidWebViewController)
-          .setMediaPlaybackRequiresUserGesture(false);
-
-      // Configurar para persistir dados entre sessões
-      (controller.platform as AndroidWebViewController)
-          .setOnPlatformPermissionRequest(
-              (PlatformWebViewPermissionRequest request) => request.grant());
-    }
-
-    // Configuração específica para iOS (WebKit)
-    if (controller.platform is WebKitWebViewController) {
-      (controller.platform as WebKitWebViewController)
-          .setAllowsBackForwardNavigationGestures(true);
-    }
-
-    controller
+  void _setupWebView() {
+    _webViewController
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0x00000000))
+      ..addJavaScriptChannel(
+        'PlatformChannel',
+        onMessageReceived: _handleJavaScriptChannelMessage,
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
+          onProgress: (int progress) {
+            debugPrint('WebView está carregando (progresso: $progress%)');
+          },
           onPageStarted: (String url) {
-            debugPrint('Navegação iniciada: $url');
+            debugPrint('Página iniciada: $url');
+            _pageLoadStartTime = DateTime.now();
           },
           onPageFinished: (String url) {
-            debugPrint('Navegação finalizada: $url');
-            // Verifica se o WebView está realmente pronto
-            controller.runJavaScript(
-                'document.body.style.backgroundColor = "white";');
-
-            // Script para verificar e ativar cache do ServiceWorker para PWA
-            controller.runJavaScript('''
-              // Implementar estratégia de cache para PWA
-              try {
-                // Verificar se o PWA tem um service worker e ativar
-                if ('serviceWorker' in navigator) {
-                  navigator.serviceWorker.register('/service-worker.js')
-                    .catch(function(err) {
-                      console.log('ServiceWorker registration failed: ', err);
-                    });
-                }
-                
-                // Configurar cache para assets
-                if ('caches' in window) {
-                  // Criar um cache específico para o app
-                  caches.open('pwa-assets-cache').then(function(cache) {
-                    // Cache de recursos principais
-                    const cacheUrls = [
-                      '/index.html',
-                      '/styles.css',
-                      '/script.js',
-                      '/images/logo.png'
-                    ];
-                    
-                    // Tenta fazer cache dos recursos principais
-                    cache.addAll(cacheUrls).catch(e => console.log('Cache falhou:', e));
-                    
-                    // Lista de assets críticos caso o PWA informe algum
-                    if (window.PWA_ASSETS && Array.isArray(window.PWA_ASSETS)) {
-                      cache.addAll(window.PWA_ASSETS).catch(e => console.log('Cache de PWA_ASSETS falhou:', e));
-                    }
-                  });
-                }
-                
-                // Configurar localStorage para armazenar informação de cache
-                localStorage.setItem('cache_last_updated', new Date().toISOString());
-                localStorage.setItem('cache_enabled', 'true');
-                
-                console.log('Estratégia de cache configurada com sucesso');
-              } catch (e) {
-                console.error('Erro ao configurar cache:', e);
-              }
-            ''');
+            debugPrint('Página carregada: $url');
+            _onPageLoaded(url);
           },
           onWebResourceError: (WebResourceError error) {
-            _logError('WebView error: ${error.description}');
+            debugPrint('Erro na WebView: ${error.description}');
+            _handleWebViewError(error);
           },
           onNavigationRequest: (NavigationRequest request) {
-            // Remove a restrição de navegação que pode estar causando problemas
-            // Quando um QR code é escaneado, queremos permitir a navegação para essa URL
-            return NavigationDecision.navigate;
+            return _handleNavigationRequest(request);
           },
         ),
       )
+      // Configurar handlers do JavaScript para iOS e funcionalidades nativas
       ..addJavaScriptChannel(
-        'Flutter',
-        onMessageReceived: (JavaScriptMessage message) {
-          debugPrint('Mensagem do JavaScript: ${message.message}');
-        },
+        'iOSNativeChannel',
+        onMessageReceived: _handleIOSNativeMessage,
       )
-      // Configurar para persistência de cookies e localStorage
-      ..setOnConsoleMessage((JavaScriptConsoleMessage message) {
-        debugPrint('Console: ${message.message}');
-      })
-      // Define configurações para persistência
-      ..enableZoom(true)
-      ..setBackgroundColor(Colors.white) // Garante fundo branco
-      ..setUserAgent('Mozilla/5.0 Flutter WebView')
-      // Habilita armazenamento local (localStorage) e cookies
-      ..setJavaScriptMode(JavaScriptMode.unrestricted);
-
-    // Injetar um script para monitorar eventos relacionados a problemas de renderização
-    controller.runJavaScript('''
-      // Configurar detecção de problemas de renderização
-      document.addEventListener('DOMContentLoaded', function() {
-        console.log('DOM carregado completamente');
-        document.body.style.backgroundColor = 'white';
-        
-        // Interceptar elementos de input file
-        interceptFileInputs();
+      ..setOnConsoleMessage((message) {
+        debugPrint('Console WebView: ${message.message}');
       });
-      
-      // Monitorar erros de renderização
-      window.addEventListener('error', function(e) {
-        console.error('Erro de renderização:', e.message);
-        window.Flutter.postMessage('Erro: ' + e.message);
-      });
-      
-      // Configurar cookies via JavaScript
-      document.cookie = "session_persistent=true; domain=.example.com; path=/; expires=${DateTime.now().add(const Duration(days: 365)).toUtc()}";
-      localStorage.setItem('app_initialized', 'true');
-      
-      // Função para interceptar elementos input file
-      function interceptFileInputs() {
-        console.log('Configurando interceptação de inputs file');
-        
-        // Observador de mutação para detectar novos elementos input adicionados ao DOM
-        const observer = new MutationObserver(function(mutations) {
-          mutations.forEach(function(mutation) {
-            if (mutation.addedNodes) {
-              mutation.addedNodes.forEach(function(node) {
-                if (node.nodeType === 1) { // Elemento
-                  const inputs = node.querySelectorAll('input[type="file"]');
-                  if (inputs.length) {
-                    inputs.forEach(setupFileInputInterceptor);
-                  }
-                  
-                  // Se o próprio nó for um input file
-                  if (node.tagName === 'INPUT' && node.type === 'file') {
-                    setupFileInputInterceptor(node);
-                  }
-                }
-              });
-            }
-          });
-        });
-        
-        // Iniciar observador
-        observer.observe(document.documentElement, { 
-          childList: true, 
-          subtree: true 
-        });
-        
-        // Configurar inputs já existentes
-        document.querySelectorAll('input[type="file"]').forEach(setupFileInputInterceptor);
-        
-        // Função para configurar interceptação em um input específico
-        function setupFileInputInterceptor(input) {
-          console.log('Interceptando input file:', input);
-          
-          // Armazenar elementos originais
-          const originalClick = input.onclick;
-          
-          // Substituir o evento de clique
-          input.onclick = function(event) {
-            console.log('Clique em input file interceptado');
-            event.preventDefault();
-            
-            // Notificar Flutter sobre a interceptação
-            window.Flutter.postMessage(JSON.stringify({
-              type: 'fileInputIntercepted',
-              inputId: input.id,
-              capture: input.getAttribute('capture'),
-              accept: input.accept
-            }));
-            
-            return false;
-          };
-        }
-      }
-    ''');
 
-    // Adicionar canal JavaScript para comunicação bidirecional
-    controller.addJavaScriptChannel(
-      'Flutter',
+    // Configurar handlers para eventos da câmera e visualização de imagens
+    _configureImageHandlers();
+
+    // Adicione o URL inicial aqui
+    _loadInitialUrl();
+  }
+
+  void _configureImageHandlers() {
+    // Adicionar handler para notificar quando a imagem for carregada
+    _webViewController.addJavaScriptChannel(
+      'imageLoaded',
       onMessageReceived: (JavaScriptMessage message) {
-        debugPrint('Mensagem do JavaScript: ${message.message}');
-        _processJavaScriptMessage(message.message);
+        final bool success = message.message == 'true';
+        debugPrint('🖼️ Imagem carregada: $success');
+
+        if (!success) {
+          // Se a imagem não carregou corretamente, registrar o erro
+          Logger.error('Falha ao carregar imagem no WebView',
+              category: 'rendering',
+              extra: {'plataforma': Platform.isIOS ? 'iOS' : 'Android'});
+        }
       },
     );
 
-    _webViewController = controller;
+    // Adicionar handler para fechar a visualização (botão no iOS)
+    _webViewController.addJavaScriptChannel(
+      'closeView',
+      onMessageReceived: (JavaScriptMessage message) {
+        debugPrint('Fechar visualização solicitado pelo WebView');
+        _navigateBack();
+      },
+    );
 
-    // Carregue uma página em branco para inicializar o WebView
-    _webViewController.loadHtmlString('''
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <style>
-            body { 
-              background-color: white; 
-              color: black; 
-              font-family: Arial, sans-serif; 
-            }
-          </style>
-        </head>
-        <body>
-          <div style="padding: 20px;">
-            <h3>Escaneie um código QR para começar</h3>
-          </div>
-        </body>
-      </html>
-    ''');
-  }
-
-  void _logError(String message) {
-    // Usando o Logger ao invés do Sentry diretamente
-    Logger.error(message, category: 'webview');
-  }
-
-  @override
-  void dispose() {
-    _healthCheckTimer?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.paused) {
-      debugPrint('App minimizado');
-      // Salvar estado da webview quando o app é minimizado
-      _saveWebViewState(isClosing: false);
-    } else if (state == AppLifecycleState.resumed) {
-      debugPrint('App retomado');
-      // Restaurar estado da webview quando o app volta ao primeiro plano
-      _restoreWebViewState();
-
-      // Verificar saúde do WebView após retomada
-      _performWebViewHealthCheck();
-    } else if (state == AppLifecycleState.detached) {
-      // App sendo fechado/destruído
-      _saveWebViewState(isClosing: true);
-    }
-  }
-
-  // Função para salvar o estado atual do WebView
-  Future<void> _saveWebViewState({bool isClosing = false}) async {
-    try {
-      // Captura estado atual via JavaScript
-      await _webViewController.runJavaScript('''
-        try {
-          // Salvar timestamp para verificação de validade do cache
-          localStorage.setItem('webview_last_state_timestamp', '${DateTime.now().millisecondsSinceEpoch}');
-          
-          // Salvar URL atual
-          localStorage.setItem('webview_last_url', window.location.href);
-          
-          // Salvar scroll position
-          localStorage.setItem('webview_scroll_position', window.scrollY.toString());
-          
-          // Informar ao PWA que o app está sendo minimizado/fechado
-          localStorage.setItem('webview_app_state', '${isClosing ? "closed" : "paused"}');
-          
-          // Criar evento para o PWA saber que deve salvar seu estado
-          window.dispatchEvent(new CustomEvent('appStateChange', {
-            detail: { state: '${isClosing ? "closed" : "paused"}' }
-          }));
-          
-          console.log('Estado do WebView salvo com sucesso');
-        } catch (e) {
-          console.error('Erro ao salvar estado:', e);
-        }
-      ''');
-    } catch (e) {
-      _logError('Erro ao salvar estado do WebView: $e');
-    }
-  }
-
-  // Função para restaurar o estado do WebView
-  Future<void> _restoreWebViewState() async {
-    try {
-      // Restaura estado via JavaScript
-      await _webViewController.runJavaScript('''
-        try {
-          // Verificar se há um estado salvo
-          const lastTimestamp = localStorage.getItem('webview_last_state_timestamp');
-          const lastUrl = localStorage.getItem('webview_last_url');
-          
-          if (lastTimestamp && lastUrl) {
-            const now = ${DateTime.now().millisecondsSinceEpoch};
-            const lastTime = parseInt(lastTimestamp);
-            
-            // Verificar se o estado salvo é recente (menos de 30 minutos)
-            if (now - lastTime < 30 * 60 * 1000) {
-              // Restaurar scroll após carregar
-              const scrollPos = localStorage.getItem('webview_scroll_position');
-              if (scrollPos) {
-                window.scrollTo(0, parseInt(scrollPos));
-              }
-              
-              // Notificar o PWA que o app foi restaurado
-              localStorage.setItem('webview_app_state', 'resumed');
-              
-              // Criar evento para o PWA saber que deve restaurar seu estado
-              window.dispatchEvent(new CustomEvent('appStateChange', {
-                detail: { state: 'resumed' }
-              }));
-              
-              console.log('Estado do WebView restaurado com sucesso');
-            }
-          }
-        } catch (e) {
-          console.error('Erro ao restaurar estado:', e);
-        }
-      ''');
-
-      // Verificar conexão
-      _checkConnectivity();
-    } catch (e) {
-      _logError('Erro ao restaurar estado do WebView: $e');
-    }
-  }
-
-  // Verificar conexão com a internet
-  Future<void> _checkConnectivity() async {
-    try {
-      await _webViewController.runJavaScript('''
-        // Verificar conexão
-        function checkOnlineStatus() {
-          if (navigator.onLine) {
-            console.log('Dispositivo online');
-            document.body.classList.remove('offline-mode');
-            
-            // Tentar recarregar recursos offline se necessário
-            if (window.PWA_NEEDS_RELOAD === true) {
-              console.log('Recarregando recursos após reconexão');
-              window.location.reload();
-            }
-          } else {
-            console.log('Dispositivo offline');
-            document.body.classList.add('offline-mode');
-            
-            // Marcar para recarregar quando estiver online
-            window.PWA_NEEDS_RELOAD = true;
-            
-            // Mostrar aviso de offline
-            if (!document.getElementById('offline-message')) {
-              const div = document.createElement('div');
-              div.id = 'offline-message';
-              div.style.position = 'fixed';
-              div.style.bottom = '10px';
-              div.style.left = '10px';
-              div.style.right = '10px';
-              div.style.backgroundColor = 'rgba(0,0,0,0.7)';
-              div.style.color = 'white';
-              div.style.padding = '10px';
-              div.style.borderRadius = '5px';
-              div.style.zIndex = '9999';
-              div.style.textAlign = 'center';
-              div.innerHTML = 'Você está offline. Algumas funcionalidades podem não estar disponíveis.';
-              document.body.appendChild(div);
-            }
-          }
-        }
-        
-        // Verificar status inicial
-        checkOnlineStatus();
-        
-        // Configurar listeners para mudanças de conectividade
-        window.addEventListener('online', checkOnlineStatus);
-        window.addEventListener('offline', checkOnlineStatus);
-      ''');
-    } catch (e) {
-      _logError('Erro ao verificar conectividade: $e');
-    }
-  }
-
-  // Função para realizar teste de integridade do WebView
-  Future<void> _performWebViewHealthCheck() async {
-    try {
-      // Verificar se os diagnósticos estão desativados na página atual
-      // Usamos toString() == 'true' para lidar com diferentes tipos de retorno
-      try {
-        final disableCheck =
-            await _webViewController.runJavaScriptReturningResult('''
-          (function() {
-            try {
-              return (window.disableDiagnostics === true).toString();
-            } catch(e) {
-              return 'false';
-            }
-          })();
-        ''');
-
-        final String disableResult =
-            disableCheck.toString().toLowerCase().trim();
-        if (disableResult == 'true') {
-          debugPrint(
-              'Diagnóstico do WebView ignorado: diagnósticos desativados na página atual');
-          return;
-        }
-      } catch (e) {
-        debugPrint('Erro ao verificar flag disableDiagnostics: $e');
-        // Se não conseguimos verificar, desistimos da verificação de saúde
-        return;
-      }
-
-      // Verificar o URL atual para determinar se estamos em about:blank ou data:
-      String currentUrl = '';
-      try {
-        currentUrl = await _webViewController.currentUrl() ?? '';
-      } catch (e) {
-        debugPrint('Erro ao obter URL atual: $e');
-        // Se não podemos obter URL, desistimos da verificação
-        return;
-      }
-
-      // Se estivermos em about:blank ou em uma URL de data (como uma imagem base64),
-      // ou em uma URL vazia, não executamos diagnósticos
-      final bool isEmptyPage = currentUrl.isEmpty ||
-          currentUrl == 'about:blank' ||
-          currentUrl.startsWith('data:');
-
-      if (isEmptyPage) {
+    // Adicionar handler para mudanças de orientação
+    _webViewController.addJavaScriptChannel(
+      'orientationChanged',
+      onMessageReceived: (JavaScriptMessage message) {
+        final bool isLandscape = message.message == 'true';
         debugPrint(
-            'Diagnóstico do WebView ignorado: página vazia ou about:blank');
-        return;
-      }
+            'Orientação mudou para: ${isLandscape ? "paisagem" : "retrato"}');
 
+ 
       // Criamos um diagnóstico básico que funciona em qualquer página
       final basicScript = '''
         (function() {
@@ -1277,1525 +909,861 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
           if (mounted) {
             _startPeriodicHealthCheck();
           }
+
+        // Podemos ajustar elementos da UI conforme a orientação
+        setState(() {
+          _isLandscapeMode = isLandscape;
+ main
         });
-      }
+      },
+    );
+  }
 
-      // Se foi detectado um QR code com URL, carregar a URL no WebView após mostrar a prévia
-      if (qrCode != null &&
-          (qrCode.startsWith('http://') || qrCode.startsWith('https://'))) {
-        await Future.delayed(const Duration(seconds: 1));
-        await _loadUrlSafely(qrCode);
-      }
+  // Lidar com mensagens específicas do iOS
+  void _handleIOSNativeMessage(JavaScriptMessage message) {
+    try {
+      final Map<String, dynamic> data = jsonDecode(message.message);
+      final String action = data['action'] ?? '';
 
-      // Se foi chamado de um input file, processar para o elemento
-      if (inputId.isNotEmpty) {
-        await _webViewController.runJavaScript('''
-          (function() {
-            try {
-              // Garantir que diagnósticos estão desativados
-              window.disableDiagnostics = true;
-              
-              const input = document.getElementById('$inputId') || document.querySelector('input[type="file"]');
-              if (!input) {
-                console.error('Input element not found: $inputId');
-                return;
-              }
-              
-              const byteString = atob('$base64Image');
-              const mimeType = 'image/jpeg';
-              const ab = new ArrayBuffer(byteString.length);
-              const ia = new Uint8Array(ab);
-              
-              for (let i = 0; i < byteString.length; i++) {
-                ia[i] = byteString.charCodeAt(i);
-              }
-              
-              const blob = new Blob([ab], {type: mimeType});
-              const fileName = 'image_${DateTime.now().millisecondsSinceEpoch}.jpg';
-              const file = new File([blob], fileName, {type: mimeType});
-              
-              const dataTransfer = new DataTransfer();
-              dataTransfer.items.add(file);
-              input.files = dataTransfer.files;
-              
-              const event = new Event('change', { bubbles: true });
-              input.dispatchEvent(event);
-              
-              if ('$qrCode' !== 'null') {
-                document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
-                  detail: { qrcode: '$qrCode' }
-                }));
-              }
-            } catch (error) {
-              console.error('❌ Erro ao processar arquivo:', error);
-            }
-          })();
-        ''');
+      switch (action) {
+        case 'hapticFeedback':
+          if (Platform.isIOS) {
+            HapticFeedback.mediumImpact();
+          }
+          break;
+        case 'cameraDenied':
+          _showCameraPermissionDialog();
+          break;
+        default:
+          debugPrint('Ação desconhecida do iOS: $action');
       }
-
-      // Enviar dados para o servidor
-      try {
-        await _uploadFile(imagePath, 'image', qrCode: qrCode);
-      } catch (uploadError, uploadStack) {
-        debugPrint('⚠️ Erro ao enviar arquivo para o servidor: $uploadError');
-        await Sentry.captureException(
-          uploadError,
-          stackTrace: uploadStack,
-          hint: {'info': 'Erro ao fazer upload após processamento de imagem'}
-              as Hint,
-        );
-        _showError(
-            'O arquivo foi processado, mas houve um erro no envio ao servidor: $uploadError');
-      }
-    } catch (e, stackTrace) {
-      await Sentry.captureException(e, stackTrace: stackTrace);
-      _showError('Erro ao processar imagem: $e');
+    } catch (e) {
+      debugPrint('Erro ao processar mensagem do iOS: $e');
     }
   }
 
-  Future<void> _scanQRCodeOrTakePicture({String inputId = ''}) async {
+  void _navigateBack() {
+    // Função auxiliar para navegação de volta
     try {
-      bool hasPermission = await _checkPermissions();
-      if (!hasPermission) return;
+      // Usar método alternativo para verificar se pode voltar
+      _webViewController.canGoBack().then((canGoBack) {
+        if (canGoBack) {
+          _webViewController.goBack();
+        } else {
+          // Se não puder voltar na WebView, tentar na navegação do app
+          Navigator.of(context).maybePop();
+        }
+      }).catchError((e) {
+        // Se o método não existir, tentar alternativa
+        Navigator.of(context).maybePop();
+      });
+    } catch (e) {
+      // Fallback para navegação do app
+      Navigator.of(context).maybePop();
+    }
+  }
 
-      // Desativar diagnósticos e cancelar health check
-      _healthCheckTimer?.cancel();
-      try {
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = true;");
-      } catch (e) {
-        debugPrint('Erro ao desabilitar diagnósticos antes da câmera: $e');
+  // Exibir diálogo de permissão da câmera
+  void _showCameraPermissionDialog() {
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permissão necessária'),
+        content: const Text(
+            'Esta funcionalidade requer acesso à câmera. Por favor, conceda a permissão nas configurações do aplicativo.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              openAppSettings();
+            },
+            child: const Text('Configurações'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _logError(String message) {
+    // Usando o Logger ao invés do Sentry diretamente
+  }
+
+  // Função para scanear um QR Code ou capturar imagem
+  Future<void> _scanQRCodeOrTakePicture(String? inputElementId) async {
+    if (_isProcessing) return;
+
+    try {
+      // Verificar permissões necessárias
+      final status = await Permission.camera.request();
+      if (!status.isGranted) {
+        _showError('Permissão da câmera necessária para esta função');
+        return;
       }
 
-      // Abre um modal customizado com câmera que permite escanear QR code ou tirar foto
+      // Desativar diagnósticos durante o uso da câmera
+      if (_webViewController != null) {
+        await _webViewController
+            .runJavaScript("window.disableDiagnostics = true;");
+      }
+
+      // Verificar se é seguro abrir a câmera
+      bool isSafe = true;
+
+      if (!isSafe) {
+        debugPrint('❌ Não é seguro abrir a câmera agora');
+        _showError(
+            'Não foi possível acessar a câmera. Por favor, reinicie o aplicativo.');
+        return;
+      }
+
+      // Abrir a câmera com QR scanner
       final result = await showModalBottomSheet<Map<String, dynamic>>(
         context: context,
         isScrollControlled: true,
+        isDismissible: true,
         backgroundColor: Colors.transparent,
-        builder: (context) => Container(
-          height: MediaQuery.of(context).size.height * 0.9,
-          decoration: const BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(20),
-              topRight: Radius.circular(20),
-            ),
-          ),
-          child: CameraWithQRScanner(
-            onQRCodeDetected: (String code) {
-              // Retornar resultado em vez de fechar o modal diretamente
-              Navigator.pop(context, {'type': 'qrcode', 'data': code});
-            },
-            onPhotoTaken: (String imagePath) {
-              // Retornar resultado em vez de fechar o modal diretamente
-              Navigator.pop(context, {'type': 'photo', 'data': imagePath});
-            },
-          ),
+        builder: (context) => CameraWithQRScanner(
+          onQRCodeDetected: (code) {
+            Navigator.of(context).pop({'type': 'qrcode', 'data': code});
+          },
+          onPhotoTaken: (path) {
+            Navigator.of(context).pop({'type': 'image', 'data': path});
+          },
         ),
       );
 
-      // Assegurar que diagnósticos estão desabilitados após fechar o modal
-      try {
+      // Garantir que diagnósticos permaneçam desabilitados após fechar a câmera
+      if (_webViewController != null) {
         await _webViewController
             .runJavaScript("window.disableDiagnostics = true;");
-      } catch (e) {
-        debugPrint('Erro ao desabilitar diagnósticos após câmera: $e');
       }
 
-      // Se não houver resultado, o usuário cancelou
-      if (result == null) {
-        // Reativar health check após 10 segundos
-        Future.delayed(const Duration(seconds: 10), () {
-          if (mounted) {
-            _startPeriodicHealthCheck();
-          }
-        });
-        return;
-      }
+      // Processar resultado
+      if (result != null) {
+        final String type = result['type'];
+        final String data = result['data'];
 
-      // Processar o resultado após o modal ser fechado - manter diagnósticos desativados
-      if (result['type'] == 'qrcode') {
-        final String code = result['data'];
-        final String? imagePath = result['imagePath']
-            as String?; // Verificar se temos uma imagem junto com o QR code
+        if (type == 'qrcode') {
+          final String qrData = data;
+          debugPrint('📷 QR Code escaneado: $qrData');
 
-        // Processar o código QR
-        setState(() {
-          _urlController.text = code;
-          showFrame = true;
-        });
-
-        // Se temos uma imagem junto com o QR code, processar a imagem e o QR code
-        if (imagePath != null) {
-          // Processar a imagem com o QR code
-          if (inputId.isNotEmpty) {
-            // Se foi chamado de um input file, enviar para o elemento
-            await _processSelectedImage(imagePath, inputId);
+          if (inputElementId != null && inputElementId.isNotEmpty) {
+            // Preencher dados no elemento de input
+            await _sendQrData(qrData, inputElementId);
           } else {
-            // Processar a foto e o QR code juntos
-            await _uploadFile(imagePath, 'image', qrCode: code);
-          }
-        } else {
-          // Apenas o QR code foi detectado (sem imagem)
-          // Registrar URL escaneada
-          await _sendQrData(code);
-        }
-
-        // Se foi chamado de um input file, injetar os dados no elemento
-        if (inputId.isNotEmpty) {
-          // Salvar QR code detectado no JavaScript para uso posterior
-          await _webViewController.runJavaScript('''
-            window.lastDetectedQRCode = "$code";
-            
-            // Disparar evento para notificar o PWA
-            document.dispatchEvent(new CustomEvent('qrCodeDetected', { 
-              detail: { qrcode: "$code" }
-            }));
-          ''');
-        } else {
-          // Carregar URL na WebView - Garante que a WebView seja completamente recarregada
-          await _loadUrlSafely(code);
-
-          // Assegura que o estado está atualizado após a detecção do QR
-          if (mounted) {
-            setState(() {
-              showFrame = true;
-            });
-          }
-        }
-      } else if (result['type'] == 'photo') {
-        final String imagePath = result['data'];
-        final String? qrCode = result['qrCode']
-            as String?; // Verificar se temos um QR code detectado na foto
-
-        try {
-          // Se foi chamado de um input file, enviar para o elemento
-          if (inputId.isNotEmpty) {
-            await _processSelectedImage(imagePath, inputId);
-          } else {
-            // Processar a foto, incluindo QR code se detectado
-            await _uploadFile(imagePath, 'image', qrCode: qrCode);
-
-            // Garantir que o WebView esteja visível
-            if (mounted) {
-              setState(() {
-                showFrame = true;
-              });
+            // Carregar URL do QR code (se for URL)
+            if (qrData.startsWith('http')) {
+              await _loadUrlSafely(qrData);
+            } else {
+              // Mostrar dados do QR como texto
+              _showInfo('QR Code: $qrData');
             }
-
-            // Converter a imagem para base64 - diagnósticos continuam desabilitados
-            final String base64Image =
-                base64Encode(await File(imagePath).readAsBytes());
-
-            // Certificar que diagnósticos estão desativados
-            await _webViewController
-                .runJavaScript("window.disableDiagnostics = true;");
-
-            // Carregar uma página HTML com a foto
-            final String photoHtml = '''
-              <!DOCTYPE html>
-              <html>
-                <head>
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                  <title>Foto Capturada</title>
-                  <script>
-                    // Desabilitar diagnósticos antes que a página carregue
-                    window.disableDiagnostics = true;
-                  </script>
-                  <style>
-                    body { 
-                      margin: 0; 
-                      padding: 20px;
-                      background-color: white;
-                      font-family: Arial, sans-serif;
-                    }
-                    .preview-container {
-                      max-width: 100%;
-                      margin: 0 auto;
-                      text-align: center;
-                    }
-                    .preview-image {
-                      max-width: 100%;
-                      max-height: 80vh;
-                      border-radius: 8px;
-                      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                    }
-                    h3 {
-                      color: #333;
-                      margin-bottom: 20px;
-                    }
-                  </style>
-                </head>
-                <body>
-                  <div class="preview-container">
-                    <h3>Foto Capturada</h3>
-                    <img src="data:image/jpeg;base64,$base64Image" class="preview-image" alt="Preview">
-                  </div>
-                  <script>
-                    // Garantir que diagnósticos permanecem desativados
-                    window.disableDiagnostics = true;
-                  </script>
-                </body>
-              </html>
-            ''';
-
-            await _webViewController.loadHtmlString(photoHtml);
-
-            // Verificar novamente para garantir que a flag está ativa
-            await Future.delayed(const Duration(milliseconds: 500));
-            await _webViewController
-                .runJavaScript("window.disableDiagnostics = true;");
           }
-        } catch (e) {
-          _logError('Erro ao processar imagem: $e');
-          _showError('Erro ao processar imagem: $e');
+        } else if (type == 'image') {
+          final String path = data;
+
+          // Processar a imagem
+          await _processSelectedImage(path, inputElementId ?? '');
+        } else if (type == 'error') {
+          final String errorMsg = result['message'];
+          debugPrint('❌ Erro na câmera: $errorMsg');
+
+          // Registrar erro
+          await Logger.captureException(Exception('Erro na câmera: $errorMsg'),
+              extra: {'mensagem': errorMsg}, category: 'camera_error');
+
+          _showError('Erro ao acessar a câmera: $errorMsg');
         }
-      }
-
-      // Manter diagnósticos desativados por um tempo razoável
-      await Future.delayed(const Duration(seconds: 2));
-      try {
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = true;");
-      } catch (e) {
-        debugPrint('Erro ao desabilitar diagnósticos no final: $e');
-      }
-
-      // Reativar health check após um tempo suficiente
-      Future.delayed(const Duration(seconds: 10), () {
-        if (mounted) {
-          _startPeriodicHealthCheck();
-        }
-      });
-    } catch (e, stackTrace) {
-      await Sentry.captureException(e, stackTrace: stackTrace);
-      _showError('Erro ao tirar foto ou escanear QR Code: $e');
-
-      // Reativar health check após erro, mas com delay
-      Future.delayed(const Duration(seconds: 5), () {
-        if (mounted) {
-          _startPeriodicHealthCheck();
-        }
-      });
-    }
-  }
-
-  // Função auxiliar para carregar URLs com segurança
-  Future<void> _loadUrlSafely(String url) async {
-    try {
-      // Desabilitar temporariamente o health check durante a navegação
-      _healthCheckTimer?.cancel();
-
-      // Injetar script para desabilitar diagnósticos durante a navegação
-      await _webViewController
-          .runJavaScript("window.disableDiagnostics = true;");
-
-      // Carregar a URL
-      await _webViewController.loadRequest(Uri.parse(url));
-
-      // Verificar se a página carregou corretamente depois de um curto intervalo
-      await Future.delayed(const Duration(seconds: 1));
-      await _webViewController.runJavaScript('''
-        if (document.body) {
-          document.body.style.backgroundColor = "white";
-          console.log("Página carregada e cor de fundo definida");
-          
-          // Ativar diagnósticos quando a página estiver carregada corretamente
-          window.disableDiagnostics = false;
-        } else {
-          console.error("Corpo do documento não encontrado");
-        }
-      ''');
-
-      // Reativar o health check após um tempo adequado para a página carregar completamente
-      Future.delayed(const Duration(seconds: 3), () {
-        if (mounted) {
-          _startPeriodicHealthCheck();
-        }
-      });
-    } catch (e) {
-      _logError('Erro ao carregar URL: $e');
-
-      // Tenta recarregar a página em caso de erro
-      try {
-        await _webViewController.reload();
-
-        // Reativar diagnósticos após erro
-        await Future.delayed(const Duration(seconds: 1));
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = false;");
-
-        // Reativar health check
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted) {
-            _startPeriodicHealthCheck();
-          }
-        });
-      } catch (reloadError) {
-        _logError('Erro ao tentar recarregar: $reloadError');
-      }
-    }
-  }
-
-  // Carrega HTML base para garantir que o WebView está funcionando
-  void _loadHtmlContent() {
-    _webViewController.loadHtmlString('''
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <style>
-            body { 
-              background-color: white; 
-              color: black; 
-              font-family: Arial, sans-serif; 
-            }
-          </style>
-        </head>
-        <body>
-          <div style="padding: 20px;">
-            <h3>Escaneie um código QR para começar</h3>
-          </div>
-        </body>
-      </html>
-    ''');
-  }
-
-  // Função para enviar dados do QR Code para o servidor
-  Future<void> _sendQrData(String qrData) async {
-    try {
-      final response = await http.post(
-        Uri.parse(apiUrl),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'type': 'qr_code', 'data': qrData}),
-      );
-
-      if (response.statusCode == 200) {
-        debugPrint('QR Code enviado com sucesso');
       } else {
-        _logError('Erro ao enviar QR Code: ${response.statusCode}');
+        // Usuário cancelou a operação
+        debugPrint('🚫 Operação de câmera cancelada pelo usuário');
       }
-    } catch (e, stackTrace) {
-      await Sentry.captureException(e, stackTrace: stackTrace);
-      _logError('Exceção ao enviar QR Code: $e');
+
+      // Reativar diagnósticos após uso da câmera
+      if (mounted) {
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted && _webViewController != null) {
+            _webViewController
+                .runJavaScript("window.disableDiagnostics = false;");
+            _startPeriodicHealthCheck();
+          }
+        });
+      }
+    } catch (e) {
+      // Capturar exceções
+      debugPrint('❌ Erro ao abrir câmera: $e');
+
+      // Registrar erro no Sentry
+      Logger.captureException(e,
+          category: 'camera_open', extra: {'trigger': 'qr_scan_button'});
+
+      // Mostrar mensagem de erro adequada
+      if (e.toString().contains('Too many receivers')) {
+        _markReceiverResetRequired();
+        _showError(
+            'Por favor, reinicie o aplicativo para continuar usando a câmera.');
+      } else if (e.toString().contains('Camera unavailable') ||
+          e.toString().contains('camera device') ||
+          e.toString().contains('camera initialization')) {
+        _showError(
+            'Câmera temporariamente indisponível. Tente novamente mais tarde.');
+      } else {
+        _showError('Não foi possível abrir a câmera: $e');
+      }
+
+      // Reativar diagnósticos e health check após erro
+      if (mounted) {
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted && _webViewController != null) {
+            _webViewController
+                .runJavaScript("window.disableDiagnostics = false;");
+            _startPeriodicHealthCheck();
+          }
+        });
+      }
     }
   }
 
-  // Função para enviar arquivos para o servidor
-  Future<void> _uploadFile(String filePath, String type,
-      {String? qrCode}) async {
+  // Método para marcar que é necessário resetar receivers
+  void _markReceiverResetRequired() {
+    // Lógica para indicar necessidade de reset
+    debugPrint('🚨 Marcando necessidade de reset para receivers');
+  }
+
+  // Método para registrar erros da câmera
+  void _logCameraError(String error) {
+    debugPrint('❌ Erro na câmera: $error');
+    Logger.error('Erro na câmera',
+        category: 'camera_error', extra: {'erro': error});
+  }
+
+  // Função para verificar se a WebView pode voltar
+  bool _canGoBack() {
+    // Implementação para verificar se pode navegar para trás
+    // Esta é uma versão simplificada
+    return true;
+  }
+
+  // Função para comprimir e redimensionar a imagem
+  // Implementa o algoritmo de redimensionamento similar ao fornecido no código TypeScript:
+  // - Largura máxima de 1280px
+  // - Mantém a proporção da imagem original
+  // - Aplica interpolação linear para melhor qualidade
+  Future<Uint8List> compressAndResizeImage(File imageFile) async {
     try {
+      // Carregar a imagem
+      final Uint8List imageBytes = await imageFile.readAsBytes();
+
+      // Verificar se temos bytes da imagem
+      if (imageBytes.isEmpty) {
+        throw Exception('Arquivo de imagem vazio');
+      }
+
+      // Decodificar a imagem
+      final img.Image? image = img.decodeImage(imageBytes);
+      if (image == null)
+        throw Exception('Não foi possível decodificar a imagem');
+
+      // Calcular nova largura e altura mantendo proporção
+      int targetWidth = image.width > 1280 ? 1280 : image.width;
+      int targetHeight = (targetWidth * image.height) ~/ image.width;
+
+      Logger.info('Redimensionando imagem:',
+          extra: {
+            'largura_original': image.width,
+            'altura_original': image.height,
+            'nova_largura': targetWidth,
+            'nova_altura': targetHeight,
+            'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+          },
+          category: 'image_processing');
+
+      // Redimensionar a imagem
+      final img.Image resizedImage = img.copyResize(image,
+          width: targetWidth,
+          height: targetHeight,
+          interpolation: img.Interpolation.linear);
+
+      // Converter para JPEG com boa qualidade (WebP não é suportado diretamente)
+      // Qualidade de 85% oferece bom equilíbrio entre tamanho e qualidade
+      final compressedBytes = img.encodeJpg(resizedImage, quality: 85);
+
+      // Registrar métricas de compressão
+      final compressionRatio = compressedBytes.length * 100 / imageBytes.length;
+      final reductionPercent = 100 - compressionRatio;
+
+      Logger.info('Imagem comprimida:',
+          extra: {
+            'tamanho_bytes_original': imageBytes.length,
+            'tamanho_bytes_final': compressedBytes.length,
+            'redução': '${reductionPercent.toStringAsFixed(2)}%',
+            'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+          },
+          category: 'image_processing');
+
+      return Uint8List.fromList(compressedBytes);
+    } catch (e, stackTrace) {
+      // Capturar e logar qualquer erro durante o processamento da imagem
+      Logger.error('Erro ao comprimir e redimensionar imagem: $e',
+          extra: {
+            'caminho_arquivo': imageFile.path,
+            'plataforma': Platform.isIOS ? 'iOS' : 'Android'
+          },
+          category: 'image_processing');
+
+      // Re-lançar exceção para ser tratada no chamador
+      throw Exception('Falha ao processar imagem: $e');
+    }
+  }
+
+  // Implementação de _processSelectedImage
+  Future<void> _processSelectedImage(String imagePath, String inputId) async {
+    try {
+      if (!mounted) return;
+
+      setState(() {
+        _isProcessing = true;
+      });
+
+      debugPrint('🖼️ Processando imagem: $imagePath para input: $inputId');
+
+      // Verificar se o arquivo existe
+      final imageFile = File(imagePath);
+      if (!await imageFile.exists()) {
+        throw Exception('Arquivo de imagem não encontrado');
+      }
+
+      // Obter informações do arquivo
+      final fileSize = await imageFile.length();
       debugPrint(
-          'Enviando arquivo: $filePath | Tipo: $type | QR Code: $qrCode');
+          '📊 Tamanho original da imagem: ${(fileSize / 1024).toStringAsFixed(2)} KB');
+
+      // No iOS, considerar a orientação da imagem e Safe Area
+      bool isIOS = Platform.isIOS;
 
       // Comprimir e redimensionar a imagem
-      final File imageFile = File(filePath);
-      final Uint8List compressedImage = await compressAndResizeImage(imageFile);
+      Uint8List compressedImageData;
+      try {
+        compressedImageData = await compressAndResizeImage(imageFile);
 
-      // SERVIDOR ATUAL - Manteremos usando este por enquanto
-      final uri = Uri.parse(apiUrl);
-
-      // Criar um request multipart
-      final request = http.MultipartRequest('POST', uri);
-
-      // Adicionar o arquivo como um arquivo multipart
-      request.files.add(http.MultipartFile.fromBytes('file', compressedImage,
-          filename: 'photo.jpg', contentType: MediaType('image', 'jpeg')));
-
-      // Adicionar outros campos
-      request.fields['type'] = type;
-
-      // Se houver QR code, adicionar como campo separado
-      if (qrCode != null) {
-        request.fields['qrcode'] = qrCode;
-        debugPrint('Enviando QR code junto com a imagem: $qrCode');
+        // Registrar resultado da compressão
+        final compressedSize = compressedImageData.length;
+        final compressionRatio =
+            (compressedSize * 100 / fileSize).toStringAsFixed(2);
+        debugPrint(
+            '📊 Tamanho após compressão: ${(compressedSize / 1024).toStringAsFixed(2)} KB (${compressionRatio}%)');
+      } catch (e) {
+        debugPrint(
+            '⚠️ Erro na compressão da imagem: $e - Usando imagem original');
+        compressedImageData = await imageFile.readAsBytes();
       }
 
-      /* 
-      // NOVO SERVIDOR E ENDPOINT - Comentado até termos as informações completas
-      // Construir a URL completa com o endpoint correto
-      // final baseUrl = "https://seuservidor.com"; // Substituir pelo servidor correto
-      // final uri = Uri.parse('$baseUrl/mkt/promotion/hash/upload-qrcode-photo');
-      
-      // // Criar um request multipart
-      // final request = http.MultipartRequest('POST', uri);
-      
-      // // Adicionar a imagem comprimida como um arquivo multipart
-      // request.files.add(
-      //   http.MultipartFile.fromBytes(
-      //     'photo', 
-      //     compressedImage,
-      //     filename: 'photo.jpg',
-      //     contentType: MediaType('image', 'jpeg')
-      //   )
-      // );
-      
-      // // Se houver QR code, adicionar como campo separado
-      // if (qrCode != null) {
-      //   request.files.add(
-      //     http.MultipartFile.fromString(
-      //       'qrcode', 
-      //       qrCode,
-      //       filename: 'qrcode.txt',
-      //       contentType: MediaType('text', 'plain')
-      //     )
-      //   );
-      // }
-      */
+      // Converter para base64 para enviar ao WebView
+      final base64Image = base64Encode(compressedImageData);
+      debugPrint(
+          '📤 Imagem codificada em base64 (${(base64Image.length / 1024).toStringAsFixed(2)} KB)');
 
-      // Enviar o request e obter a resposta
-      final streamedResponse = await request.send();
-      final responseBody = await streamedResponse.stream.bytesToString();
+      // Ajustes específicos para iOS
+      if (isIOS) {
+        // No iOS, notificar a WebView que estamos processando uma imagem
+        await _webViewController
+            .runJavaScript("window.isHandlingImageFromNative = true;");
+      }
 
-      if (streamedResponse.statusCode == 200) {
-        Logger.info('Arquivo enviado com sucesso!',
-            extra: {'qrCode': qrCode != null, 'size': compressedImage.length},
-            category: 'upload');
-        debugPrint(
-            'Arquivo enviado com sucesso! ${qrCode != null ? "Com QR code" : "Sem QR code"}');
+      // Enviar imagem para a WebView usando JavaScript
+      final jsCode = '''
+        (function() {
+          try {
+            const inputElement = document.getElementById('$inputId');
+            if (!inputElement) {
+              console.error('Input element não encontrado: $inputId');
+              return false;
+            }
+            
+            // Criar evento de upload de arquivo
+            const dataTransfer = new DataTransfer();
+            
+            // Criar um objeto Blob com os dados da imagem
+            const byteCharacters = atob('$base64Image');
+            const byteArrays = [];
+            
+            for (let offset = 0; offset < byteCharacters.length; offset += 1024) {
+              const slice = byteCharacters.slice(offset, offset + 1024);
+              
+              const byteNumbers = new Array(slice.length);
+              for (let i = 0; i < slice.length; i++) {
+                byteNumbers[i] = slice.charCodeAt(i);
+              }
+              
+              const byteArray = new Uint8Array(byteNumbers);
+              byteArrays.push(byteArray);
+            }
+            
+            // Nome do arquivo (com extensão .jpg)
+            const filename = 'imagem_${DateTime.now().millisecondsSinceEpoch}.jpg';
+            
+            // Criar o blob com o tipo correto
+            const blob = new Blob(byteArrays, {type: 'image/jpeg'});
+            const file = new File([blob], filename, {type: 'image/jpeg'});
+            
+            dataTransfer.items.add(file);
+            
+            // Setar o arquivo no input
+            inputElement.files = dataTransfer.files;
+            
+            // Disparar eventos para notificar que o arquivo foi alterado
+            const event = new Event('change', { bubbles: true });
+            inputElement.dispatchEvent(event);
+            
+            // Também disparar evento de input para compatibilidade
+            const inputEvent = new Event('input', { bubbles: true });
+            inputElement.dispatchEvent(inputEvent);
+            
+            // Notificar se a operação foi concluída
+            if (window.imageLoaded) {
+              window.imageLoaded.postMessage('true');
+            }
+            
+            console.log('Imagem carregada com sucesso no campo: ' + '$inputId');
+            return true;
+          } catch (error) {
+            console.error('Erro ao processar imagem:', error);
+            
+            // Notificar falha
+            if (window.imageLoaded) {
+              window.imageLoaded.postMessage('false');
+            }
+            
+            return false;
+          } finally {
+            // Resetar a flag de processamento (iOS)
+            window.isHandlingImageFromNative = false;
+          }
+        })();
+      ''';
+
+      // Executar o JavaScript
+      final result = await _webViewController.runJavaScript(jsCode + '; true;');
+      final success = true;
+
+      debugPrint(
+          '📤 Resultado do envio da imagem: ${success ? "Sucesso" : "Falha"}');
+
+      // Log de resultado
+      Logger.info('Processamento de imagem concluído',
+          category: 'image_upload',
+          extra: {
+            'tamanho_kb':
+                (compressedImageData.length / 1024).toStringAsFixed(2),
+            'input_id': inputId,
+            'sucesso': success,
+            'plataforma': isIOS ? 'iOS' : 'Android'
+          });
+
+      // Mostrar feedback para o usuário
+      if (success) {
+        _showInfo('Imagem carregada com sucesso');
       } else {
-        Logger.error('Erro ao enviar arquivo: ${streamedResponse.statusCode}',
-            extra: {'response': responseBody}, category: 'upload');
-        _logError('Erro ao enviar arquivo: ${streamedResponse.statusCode}');
-        _logError('Resposta: $responseBody');
+        _showError('Não foi possível carregar a imagem');
       }
     } catch (e, stackTrace) {
-      Logger.captureException(e,
-          stackTrace: stackTrace,
-          category: 'upload',
-          extra: {'filePath': filePath, 'type': type});
-      _logError('Exceção ao enviar arquivo: $e');
+      debugPrint('❌ Erro ao processar imagem: $e');
+
+      // Registrar erro
+      Logger.error('Falha ao processar imagem',
+          category: 'image_processing',
+          extra: {
+            'erro': e.toString(),
+            'caminho': imagePath,
+            'input_id': inputId,
+            'plataforma': Platform.isIOS ? 'iOS' : 'Android',
+          });
+
+      _showError('Erro ao processar imagem: ${e.toString().split('\n').first}');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
     }
   }
 
-  void _showError(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+  // Método para mostrar mensagem de informação
+  void _showInfo(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.blue,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
-  void _openUrl() async {
-    if (_formKey.currentState!.validate()) {
-      String url = _urlController.text;
+  // Método para mostrar mensagem de erro
+  void _showError(String message) {
+    if (!mounted) return;
 
-      // Opção para carregar página de teste de upload
-      if (url.toLowerCase() == 'test' || url.toLowerCase() == 'teste') {
-        _loadTestPage();
-        setState(() {
-          showFrame = true;
-        });
-        return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  // Método para carregar URL inicial
+  void _loadInitialUrl() {
+    final initialUrl = 'https://promocoes.bemall.com.br';
+    debugPrint('🌐 Carregando URL inicial: $initialUrl');
+    _webViewController.loadRequest(Uri.parse(initialUrl));
+  }
+
+  // Método para carregar URL com segurança
+  Future<void> _loadUrlSafely(String url) async {
+    try {
+      debugPrint('🌐 Carregando URL: $url');
+      await _webViewController.loadRequest(Uri.parse(url));
+    } catch (e) {
+      debugPrint('❌ Erro ao carregar URL: $e');
+      _showError('Não foi possível carregar a URL: $url');
+    }
+  }
+
+  // Método para enviar dados do QR code para um elemento de input
+  Future<void> _sendQrData(String qrData, String inputId) async {
+    try {
+      // Script para preencher o input e disparar eventos
+      final script = '''
+        (function() {
+          const inputElement = document.getElementById('$inputId');
+          if (!inputElement) {
+            console.error('Elemento não encontrado: $inputId');
+            return false;
+          }
+          
+          // Preencher o valor
+          inputElement.value = `$qrData`;
+          
+          // Disparar eventos
+          const event = new Event('change', { bubbles: true });
+          inputElement.dispatchEvent(event);
+          
+          const inputEvent = new Event('input', { bubbles: true });
+          inputElement.dispatchEvent(inputEvent);
+          
+          console.log('QR Code preenchido no campo: ' + '$inputId');
+          return true;
+        })();
+      ''';
+
+      // Executar o JavaScript
+      await _webViewController.runJavaScript(script);
+      final success = true; // Simplificação, assumindo que o script funcionou
+
+      if (success) {
+        _showInfo('Código QR preenchido com sucesso');
+      } else {
+        _showError('Não foi possível preencher o código QR');
       }
+    } catch (e) {
+      debugPrint('❌ Erro ao enviar dados do QR: $e');
+      _showError('Erro ao processar código QR');
+    }
+  }
 
-      // Carregar URL na WebView
-      await _loadUrlSafely(url);
+  // Handler para mensagens do canal JavaScript
+  void _handleJavaScriptChannelMessage(JavaScriptMessage message) {
+    try {
+      final String data = message.message;
+      debugPrint('📩 Mensagem recebida do JavaScript: $data');
+
+      // Tentar parsear como JSON
+      try {
+        final Map<String, dynamic> jsonData = jsonDecode(data);
+        final String action = jsonData['action'] ?? '';
+
+        switch (action) {
+          case 'scanQR':
+            final String? inputId = jsonData['inputId'];
+            _scanQRCodeOrTakePicture(inputId);
+            break;
+          case 'takePicture':
+            final String? inputId = jsonData['inputId'];
+            _scanQRCodeOrTakePicture(inputId);
+            break;
+          default:
+            debugPrint('⚠️ Ação desconhecida: $action');
+        }
+      } catch (e) {
+        // Se não for JSON, tratar como texto simples
+        if (data.startsWith('scanQR:')) {
+          final String inputId = data.substring(7).trim();
+          _scanQRCodeOrTakePicture(inputId);
+        } else if (data.startsWith('takePicture:')) {
+          final String inputId = data.substring(12).trim();
+          _scanQRCodeOrTakePicture(inputId);
+        } else {
+          debugPrint('⚠️ Comando não reconhecido: $data');
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Erro ao processar mensagem JavaScript: $e');
+    }
+  }
+
+  // Método para iniciar verificação periódica da WebView
+  void _startPeriodicHealthCheck() {
+    // Cancelar timer existente
+    _healthCheckTimer?.cancel();
+
+    // Criar novo timer para verificar a saúde da WebView periodicamente
+    _healthCheckTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (timer) {
+        _checkWebViewHealth();
+      },
+    );
+
+    debugPrint('🔄 Verificação periódica de saúde da WebView iniciada');
+  }
+
+  // Verificar saúde da WebView
+  Future<void> _checkWebViewHealth() async {
+    try {
+      // Verificar se a WebView ainda está respondendo
+      final result = await _webViewController.runJavaScript(
+          '(function(){try{return "health_check_ok";}catch(e){return "error";}})()');
+
+      final healthOk =
+          true; // Simplificação, assumindo que o script executou com sucesso
+
+      if (!healthOk) {
+        _healthCheckFailCount++;
+        debugPrint(
+            '⚠️ Falha na verificação de saúde da WebView: $_healthCheckFailCount/$_maxFailedHealthChecks');
+
+        if (_healthCheckFailCount >= _maxFailedHealthChecks) {
+          debugPrint(
+              '🚨 Muitas falhas consecutivas, tentando recuperar WebView');
+          _recoverWebView();
+        }
+      } else {
+        // Reset contador de falhas
+        _healthCheckFailCount = 0;
+      }
+    } catch (e) {
+      debugPrint('❌ Erro ao verificar saúde da WebView: $e');
+      _healthCheckFailCount++;
+
+      if (_healthCheckFailCount >= _maxFailedHealthChecks) {
+        _recoverWebView();
+      }
+    }
+  }
+
+  // Recuperar WebView em caso de problemas
+  Future<void> _recoverWebView() async {
+    if (!mounted) return;
+
+    debugPrint('🔄 Tentando recuperar WebView');
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      // Recarregar a página atual
+      await _webViewController.reload();
+
+      // Reset contador
+      _healthCheckFailCount = 0;
+    } catch (e) {
+      debugPrint('❌ Falha ao recuperar WebView: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  // Handler para erros da WebView
+  void _handleWebViewError(WebResourceError error) {
+    debugPrint('❌ Erro na WebView: ${error.description}');
+
+    if (error.errorCode == -2 || // net::ERR_INTERNET_DISCONNECTED
+        error.errorCode == -7 || // net::ERR_TIMED_OUT
+        error.description.contains('INTERNET_DISCONNECTED') ||
+        error.description.contains('ERR_CONNECTION_REFUSED')) {
+      // Problemas de conectividade
       setState(() {
-        showFrame = true;
+        _isOffline = true;
+        _hasConnectionError = true;
       });
     }
   }
 
-  String? _validateUrl(String? value) {
-    if (value == null || value.isEmpty) {
-      return 'Por favor, insira uma URL';
+  // Handler para quando a página é carregada
+  void _onPageLoaded(String url) {
+    debugPrint('✅ Página carregada: $url');
+
+    // Calcular tempo de carregamento
+    if (_pageLoadStartTime != null) {
+      final loadDuration = DateTime.now().difference(_pageLoadStartTime!);
+      debugPrint('⏱️ Tempo de carregamento: ${loadDuration.inMilliseconds}ms');
     }
-    if (!value.startsWith('http://') && !value.startsWith('https://')) {
-      return 'Insira uma URL válida com http:// ou https://';
+
+    setState(() {
+      _isLoading = false;
+      _hasConnectionError = false;
+      _isOffline = false;
+    });
+
+    // Injetar JavaScript para lidar com orientação da tela e outros recursos
+    _injectHelperScripts();
+
+    // Iniciar verificação periódica
+    _startPeriodicHealthCheck();
+  }
+
+  // Injetar scripts auxiliares
+  Future<void> _injectHelperScripts() async {
+    try {
+      // Script para detectar orientação
+      final orientationScript = '''
+        (function() {
+          // Detectar orientação atual
+          function checkOrientation() {
+            const isLandscape = window.innerWidth > window.innerHeight;
+            window.orientationChanged.postMessage(isLandscape ? 'true' : 'false');
+          }
+          
+          // Escutar mudanças de orientação
+          window.addEventListener('resize', checkOrientation);
+          
+          // Verificar orientação inicial
+          checkOrientation();
+          
+          // Configurar comunicação com o app nativo
+          window.sendToApp = function(data) {
+            if (window.PlatformChannel) {
+              window.PlatformChannel.postMessage(JSON.stringify(data));
+            }
+          };
+          
+          // No iOS, configurar canal específico para iOS
+          window.sendToIOS = function(data) {
+            if (window.iOSNativeChannel) {
+              window.iOSNativeChannel.postMessage(JSON.stringify(data));
+            }
+          };
+          
+          console.log('Scripts auxiliares injetados com sucesso');
+        })();
+      ''';
+
+      await _webViewController.runJavaScript(orientationScript);
+    } catch (e) {
+      debugPrint('⚠️ Erro ao injetar scripts auxiliares: $e');
     }
-    return null;
+  }
+
+  // Handler para pedidos de navegação
+  NavigationDecision _handleNavigationRequest(NavigationRequest request) {
+    debugPrint('🔗 Navegação solicitada para: ${request.url}');
+
+    // Verificar se é uma URL externa que deve abrir no navegador
+    if (request.url.startsWith('tel:') ||
+        request.url.startsWith('mailto:') ||
+        request.url.startsWith('sms:') ||
+        request.url.startsWith('https://api.whatsapp.com') ||
+        request.url.startsWith('whatsapp:')) {
+      // Abrir em app externo
+      launchUrl(Uri.parse(request.url));
+      return NavigationDecision.prevent;
+    }
+
+    // Verificar se é URL interna do app
+    final isInternalNavigation =
+        request.url.contains('bemall.com.br') || request.url.contains('promo');
+
+    if (!isInternalNavigation) {
+      // Abrir URLs externas no navegador do sistema
+      launchUrl(Uri.parse(request.url), mode: LaunchMode.externalApplication);
+      return NavigationDecision.prevent;
+    }
+
+    // Permitir navegação dentro do app
+    return NavigationDecision.navigate;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
-      // No iOS, aplicar padding adicional para evitar colisão com a barra de status
-      body: SafeArea(
-        // iOS tem bottom safe area diferente (especialmente no iPhone X+)
-        bottom: Platform.isIOS,
-        top: true,
+      backgroundColor: Colors.white,
+      body: Stack(
+        children: [
+          WebViewWidget(
+            controller: _webViewController,
+          ),
+          if (_isLoading)
+            const Center(
+              child: CircularProgressIndicator(),
+            ),
+          if (_hasConnectionError || _isOffline) _buildConnectionErrorWidget(),
+        ],
+      ),
+    );
+  }
+
+  // Widget para exibir erro de conexão
+  Widget _buildConnectionErrorWidget() {
+    return Container(
+      color: Colors.white,
+      child: Center(
         child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Barra de título com gradiente
-            Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Colors.blue.shade700, Colors.blue.shade900],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'Bemall promoções',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  Row(
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.refresh, color: Colors.white),
-                        onPressed: () => _reloadWebView(),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.camera_alt, color: Colors.white),
-                        onPressed: () => _showCameraModal(),
-                      ),
-                      PopupMenuButton<String>(
-                        icon: const Icon(Icons.more_vert, color: Colors.white),
-                        onSelected: (String value) {
-                          if (value == 'test_sentry') {
-                            _testSentryCapture();
-                          }
-                        },
-                        itemBuilder: (BuildContext context) => [
-                          const PopupMenuItem<String>(
-                            value: 'test_sentry',
-                            child: Row(
-                              children: [
-                                Icon(Icons.bug_report),
-                                SizedBox(width: 8),
-                                Text('Testar Sentry'),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
+            const Icon(
+              Icons.cloud_off,
+              size: 80,
+              color: Colors.grey,
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Sem conexão com a internet',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
               ),
             ),
-            // Conteúdo principal
-            Expanded(
-              child: _isOrientationShown
-                  ? OrientationView(
-                      onOrientationComplete: () {
-                        setState(() {
-                          _isOrientationShown = false;
-                        });
-                        _startQRCodeReadingWithTimeout();
-                      },
-                    )
-                  : _isProcessCompleted
-                      ? CompletionView(
-                          isShowingImageCapture: (bool show) {
-                            setState(() {
-                              _isShowingImageCapture = show;
-                            });
-                          },
-                          capturedImage: _capturedImage,
-                          onImageCaptured: (File image) {
-                            setState(() {
-                              _capturedImage = image;
-                            });
-                          },
-                          onSendComplete: () {
-                            setState(() {
-                              _isProcessCompleted = true;
-                            });
-                          },
-                        )
-                      : WebViewWidget(controller: _webViewController),
+            const SizedBox(height: 10),
+            const Text(
+              'Verifique sua conexão e tente novamente',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 30),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.refresh),
+              label: const Text('Tentar Novamente'),
+              onPressed: () {
+                _webViewController.reload();
+              },
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  // Carrega uma página de teste para demonstrar a interceptação de upload
-  void _loadTestPage() {
-    _webViewController.loadHtmlString('''
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Teste de Upload</title>
-          <style>
-            body {
-              font-family: Arial, sans-serif;
-              margin: 0;
-              padding: 20px;
-              background-color: #f5f5f5;
-            }
-            .container {
-              background-color: white;
-              border-radius: 10px;
-              padding: 20px;
-              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-              max-width: 500px;
-              margin: 0 auto;
-            }
-            h1 {
-              color: #333;
-              font-size: 24px;
-              margin-top: 0;
-            }
-            .form-group {
-              margin-bottom: 20px;
-            }
-            label {
-              display: block;
-              margin-bottom: 8px;
-              font-weight: bold;
-              color: #555;
-            }
-            .file-input {
-              background-color: #f9f9f9;
-              border: 2px dashed #ccc;
-              padding: 30px;
-              text-align: center;
-              cursor: pointer;
-              border-radius: 5px;
-              transition: all 0.3s;
-            }
-            .file-input:hover {
-              border-color: #2196F3;
-              background-color: #e3f2fd;
-            }
-            .button {
-              background-color: #4CAF50;
-              color: white;
-              border: none;
-              padding: 10px 20px;
-              border-radius: 5px;
-              cursor: pointer;
-              font-size: 16px;
-              transition: background-color 0.3s;
-            }
-            .button:hover {
-              background-color: #45a049;
-            }
-            .preview {
-              margin-top: 20px;
-              text-align: center;
-            }
-            .preview img {
-              max-width: 100%;
-              max-height: 300px;
-              border-radius: 5px;
-              box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-            }
-            .qr-data {
-              margin-top: 20px;
-              padding: 15px;
-              background-color: #e8f5e9;
-              border-radius: 5px;
-              border-left: 4px solid #4CAF50;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h1>Teste de Captura e Upload</h1>
-            
-            <div class="form-group">
-              <label for="camera-input">Tirar foto / Escanear QR Code:</label>
-              <div class="file-input" id="camera-container">
-                <input 
-                  type="file" 
-                  id="camera-input" 
-                  accept="image/*" 
-                  capture="environment"
-                  style="display: none;"
-                >
-                <p>Clique aqui para abrir a câmera</p>
-              </div>
-            </div>
-            
-            <div class="form-group">
-              <label for="file-input">Selecionar da galeria:</label>
-              <div class="file-input" id="file-container">
-                <input 
-                  type="file" 
-                  id="file-input" 
-                  accept="image/*"
-                  style="display: none;"
-                >
-                <p>Clique aqui para selecionar uma imagem</p>
-              </div>
-            </div>
-            
-            <div class="preview" id="image-preview">
-              <!-- Imagem será exibida aqui -->
-            </div>
-            
-            <div class="qr-data" id="qr-data" style="display: none;">
-              <h3>QR Code detectado:</h3>
-              <p id="qr-content"></p>
-            </div>
-          </div>
-          
-          <script>
-            // Configurar os containers para abrir o file input quando clicados
-            document.getElementById('camera-container').addEventListener('click', function() {
-              document.getElementById('camera-input').click();
-            });
-            
-            document.getElementById('file-container').addEventListener('click', function() {
-              document.getElementById('file-input').click();
-            });
-            
-            // Exibir a imagem selecionada na prévia
-            function handleFileSelect(event) {
-              const file = event.target.files[0];
-              if (file) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                  const preview = document.getElementById('image-preview');
-                  preview.innerHTML = '<img src="' + e.target.result + '" alt="Preview">';
-                };
-                reader.readAsDataURL(file);
-              }
-            }
-            
-            // Ouvir o evento de seleção de arquivo
-            document.getElementById('camera-input').addEventListener('change', handleFileSelect);
-            document.getElementById('file-input').addEventListener('change', handleFileSelect);
-            
-            // Ouvir evento customizado de QR code detectado
-            document.addEventListener('qrCodeDetected', function(e) {
-              if (e.detail && e.detail.qrcode) {
-                const qrData = document.getElementById('qr-data');
-                const qrContent = document.getElementById('qr-content');
-                qrContent.textContent = e.detail.qrcode;
-                qrData.style.display = 'block';
-                
-                console.log('QR Code detectado:', e.detail.qrcode);
-              }
-            });
-          </script>
-        </body>
-      </html>
-    ''');
-  }
-
-  // Inicia verificação periódica de saúde do WebView
-  void _startPeriodicHealthCheck() {
-    // Cancela timer existente, se houver
-    _healthCheckTimer?.cancel();
-
-    // Configura novo timer para verificar a cada 5 minutos
-    _healthCheckTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
-      if (mounted) {
-        _performWebViewHealthCheck();
-      } else {
-        timer.cancel();
-      }
-    });
-  }
-
-  // Função para mostrar a câmera
-  Future<void> _showCameraModal() async {
-    try {
-      debugPrint('Iniciando processo de abertura da câmera...');
-
-      // Verificar primeiro se temos permissão
-      final PermissionStatus cameraPermissionStatus =
-          await Permission.camera.request();
-      debugPrint('Status da permissão da câmera: $cameraPermissionStatus');
-
-      if (!cameraPermissionStatus.isGranted) {
-        _logError('Permissão de câmera negada pelo usuário');
-        _showError(
-            'É necessário permitir o acesso à câmera para usar esta função.');
-        return;
-      }
-
-      // Verificar se é seguro abrir a câmera
-      bool isSafeToOpenCamera = await _checkIfSafeToProceedWithCamera();
-      debugPrint('É seguro abrir a câmera? $isSafeToOpenCamera');
-
-      if (!isSafeToOpenCamera) {
-        return;
-      }
-
-      // Desabilitar health check durante o uso da câmera
-      _healthCheckTimer?.cancel();
-
-      // Desabilitar diagnósticos na página atual
-      try {
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = true;");
-      } catch (e) {
-        debugPrint('Erro ao desabilitar diagnósticos: $e');
-      }
-
-      // Limpar recursos e estado antes de abrir a câmera
-      await _disposeResourcesBeforeCamera();
-      debugPrint('Recursos limpos, preparando para abrir câmera...');
-
-      // Pequeno atraso para garantir limpeza de recursos
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      // Se muitos receptores foram registrados, mostrar erro e não abrir câmera
-      if (_receiverResetRequired) {
-        _showError(
-            'O aplicativo precisa ser reiniciado para usar a câmera. Por favor, feche completamente o aplicativo e abra-o novamente.');
-        return;
-      }
-
-      debugPrint('Abrindo modal da câmera...');
-      final result = await showModalBottomSheet<Map<String, dynamic>>(
-        context: _scaffoldKey.currentContext!,
-        isScrollControlled: true,
-        isDismissible: true,
-        backgroundColor: Colors.transparent,
-        builder: (BuildContext context) {
-          return Container(
-            height: MediaQuery.of(context).size.height * 0.9,
-            decoration: const BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(20),
-                topRight: Radius.circular(20),
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(20),
-                topRight: Radius.circular(20),
-              ),
-              child: CameraWithQRScanner(
-                onQRCodeDetected: (String qrCode) {
-                  debugPrint('QR code detectado: $qrCode');
-                  Navigator.pop(context, {'type': 'qrcode', 'data': qrCode});
-                },
-                onPhotoTaken: (String imagePath) {
-                  debugPrint('Foto tirada: $imagePath');
-                  Navigator.pop(context, {'type': 'photo', 'data': imagePath});
-                },
-              ),
-            ),
-          );
-        },
-      );
-
-      debugPrint('Resultado do modal da câmera: $result');
-
-      // Restaurar WebView e recursos após fechar a câmera
-      await _restoreResourcesAfterCamera();
-
-      // Controle de erro - se não conseguiu abrir a câmera
-      if (result == null) {
-        debugPrint('Modal da câmera fechado sem resultado');
-        // Verificar por erro de Too many receivers
-        final cameraErrorOccurred =
-            await _webViewController.runJavaScriptReturningResult('''
-          (function() {
-            return localStorage.getItem('camera_error_count') > '2';
-          })();
-        ''');
-
-        if (cameraErrorOccurred.toString() == 'true') {
-          _markReceiverResetRequired();
-        }
-
-        // Reativar health check com delay para garantir que a página está estável
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted) {
-            try {
-              _webViewController
-                  .runJavaScript("window.disableDiagnostics = false;");
-              _startPeriodicHealthCheck();
-            } catch (e) {
-              debugPrint('Erro ao reativar diagnósticos: $e');
-            }
-          }
-        });
-
-        return;
-      }
-
-      final String type = result['type'];
-      final String data = result['data'];
-
-      debugPrint('Processando resultado: tipo=$type, data=$data');
-
-      // Manter diagnósticos desabilitados durante o processamento
-      try {
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = true;");
-      } catch (e) {
-        debugPrint(
-            'Erro ao desabilitar diagnósticos durante processamento: $e');
-      }
-
-      if (type == 'qrcode') {
-        // Processar QR code detectado
-        await _processQRCode(data);
-
-        // Se o QR veio com uma imagem, processar a imagem também
-        if (result.containsKey('imagePath')) {
-          await _processSelectedImage(result['imagePath'], 'camera_file_input');
-        }
-      } else if (type == 'photo') {
-        // Processar foto tirada
-        await _processSelectedImage(data, 'camera_file_input');
-      }
-
-      // Os diagnósticos serão reativados dentro de _processSelectedImage ou _loadUrlSafely
-    } catch (e, stackTrace) {
-      debugPrint('Erro ao mostrar câmera: $e');
-      _logError('Erro ao mostrar câmera: $e');
-
-      // Verificar se o erro está relacionado a Too many receivers
-      if (e.toString().contains('receivers')) {
-        _markReceiverResetRequired();
-        _showError(
-            'O aplicativo atingiu o limite de recursos. Por favor, reinicie o aplicativo.');
-      } else {
-        await Sentry.captureException(e, stackTrace: stackTrace);
-        _showError('Não foi possível acessar a câmera: $e');
-      }
-
-      // Reativar health check após erro
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) {
-          try {
-            _webViewController
-                .runJavaScript("window.disableDiagnostics = false;");
-            _startPeriodicHealthCheck();
-          } catch (e) {
-            debugPrint('Erro ao reativar diagnósticos após erro: $e');
-          }
-        }
-      });
-    }
-  }
-
-  // Novo método para verificar se é seguro abrir a câmera (Android)
-  Future<bool> _checkIfSafeToProceedWithCamera() async {
-    try {
-      // Verificar usando a função global
-      final isSafe = await _isSafeToOpenCamera();
-      if (!isSafe) {
-        // Se não for seguro, verificar se precisa reiniciar
-        if (_receiverResetRequired) {
-          _showError(
-              'O aplicativo precisa ser reiniciado para usar a câmera. Por favor, feche e abra o aplicativo novamente.');
-        } else {
-          _showError(
-              'Muitas tentativas de acessar a câmera. Aguarde alguns minutos e tente novamente.');
-        }
-        return false;
-      }
-
-      // Verificar se houve erros de câmera armazenados
-      final hasPreviousCameraError =
-          await _webViewController.runJavaScriptReturningResult('''
-        (function() {
-          // Verificar se houve erros de câmera armazenados
-          const cameraErrorCount = localStorage.getItem('camera_error_count') || '0';
-          const lastCameraError = localStorage.getItem('last_camera_error_time');
-          const now = Date.now();
-          
-          // Se houve erro recente (nos últimos 5 minutos)
-          if (lastCameraError && (now - parseInt(lastCameraError)) < 300000) {
-            const count = parseInt(cameraErrorCount);
-            // Se tivemos mais de 3 erros consecutivos, sugerir reiniciar o app
-            if (count > 3) {
-              return true; // Não é seguro abrir a câmera
-            }
-          } else if (lastCameraError) {
-            // Se o último erro foi há mais de 5 minutos, resetar o contador
-            localStorage.setItem('camera_error_count', '0');
-          }
-          
-          return false; // É seguro abrir a câmera
-        })();
-      ''');
-
-      final bool shouldAvoid = hasPreviousCameraError.toString() == 'true';
-
-      if (shouldAvoid) {
-        _logError(
-            'Detectado excesso de erros de câmera, evitando abrir câmera');
-        _markReceiverResetRequired(); // Marcar que precisa reiniciar
-        return false;
-      }
-
-      return true;
-    } catch (e) {
-      debugPrint('Erro ao verificar segurança da câmera: $e');
-      // Em caso de erro na verificação, permitir o uso da câmera
-      return true;
-    }
-  }
-
-  // Novo método para limpar memória antes de usar a câmera
-  Future<void> _clearMemoryBeforeCameraUse() async {
-    try {
-      debugPrint('🧹 Limpando memória do sistema antes de usar a câmera');
-
-      // Forçar coleta de lixo via SystemChannels
-      await SystemChannels.platform
-          .invokeMethod<void>('SystemNavigator.routeUpdated');
-
-      // Pequeno delay para dar tempo à limpeza
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      // Se estamos no Android, tentar abordagens adicionais
-      if (Platform.isAndroid) {
-        try {
-          // Solicitar minimização e restauração rápida para liberar recursos
-          await SystemChannels.platform
-              .invokeMethod<void>('SystemNavigator.handlePopRoute');
-          await Future.delayed(const Duration(milliseconds: 100));
-        } catch (e) {
-          debugPrint('⚠️ Erro ao tentar minimizar app: $e');
-        }
-      }
-
-      debugPrint('✅ Limpeza de memória concluída');
-    } catch (e) {
-      debugPrint('⚠️ Erro ao limpar memória: $e');
-    }
-  }
-
-  // Processa QR code detectado
-  Future<void> _processQRCode(String qrData) async {
-    try {
-      debugPrint('Processando QR code: $qrData');
-
-      // Desabilitar diagnósticos durante o processamento do QR code
-      try {
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = true;");
-      } catch (e) {
-        debugPrint(
-            'Erro ao desabilitar diagnósticos durante processamento QR: $e');
-      }
-
-      // Enviar para o servidor
-      final uri = Uri.parse(apiUrl);
-      final response = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'type': 'qr_code',
-          'data': qrData,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        debugPrint('QR code enviado com sucesso para o servidor');
-      } else {
-        _logError('Erro ao enviar QR code: ${response.statusCode}');
-      }
-
-      // Verificar se o QR code é uma URL válida
-      if (qrData.startsWith('http://') || qrData.startsWith('https://')) {
-        // Carregar a URL diretamente no WebView
-        await _loadUrlSafely(qrData);
-      } else {
-        // Se não for uma URL, apenas notificar o WebView
-        await _webViewController.runJavaScript('''
-          (function() {
-            // Disparar evento com dados do QR code
-            const event = new CustomEvent('qrCodeScanned', {
-              detail: {
-                data: '$qrData'
-              }
-            });
-            document.dispatchEvent(event);
-            
-            // Também disponibilizar como variável global
-            window.lastScannedQRCode = '$qrData';
-            
-            console.log('QR code processado e enviado para o WebView: $qrData');
-            
-            // Reativar diagnósticos após processamento
-            window.disableDiagnostics = false;
-          })();
-        ''');
-
-        // Reativar health check
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted) {
-            _startPeriodicHealthCheck();
-          }
-        });
-      }
-    } catch (e, stackTrace) {
-      _logError('Erro ao processar QR code: $e');
-      await Sentry.captureException(e, stackTrace: stackTrace);
-      _showError('Erro ao processar QR code: $e');
-
-      // Reativar diagnósticos após erro
-      try {
-        await _webViewController
-            .runJavaScript("window.disableDiagnostics = false;");
-
-        // Reativar health check
-        if (mounted) {
-          _startPeriodicHealthCheck();
-        }
-      } catch (e) {
-        debugPrint('Erro ao reativar diagnósticos após erro: $e');
-      }
-    }
-  }
-
-  // Restaura recursos após fechar a câmera
-  Future<void> _restoreResourcesAfterCamera() async {
-    try {
-      // Pequeno atraso para garantir que a câmera foi fechada completamente
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      if (_webViewController != null) {
-        debugPrint('Restaurando WebView após uso da câmera');
-
-        // Recarregar completamente a WebView para garantir liberação de todos os receptores
-        await _webViewController.reload();
-
-        // Ou injetar JavaScript para retomar mídias se necessário
-        await _webViewController.runJavaScript('''
-          (function() {
-            console.log('WebView restaurado após uso da câmera');
-          })();
-        ''');
-      }
-    } catch (e) {
-      debugPrint('Erro ao restaurar recursos após câmera: $e');
-    }
-  }
-
-  // Força o reload do WebView
-  Future<void> _reloadWebView() async {
-    setState(() {
-      _isLoading = true;
-    });
-    try {
-      await _webViewController.reload();
-      _lastReload = DateTime.now();
-      _healthCheckFailCount = 0;
-      setState(() {
-        _hasConnectionError = false;
-        _isOffline = false;
-      });
-    } catch (e, stackTrace) {
-      _logError('Erro ao recarregar WebView: $e');
-      await Sentry.captureException(e, stackTrace: stackTrace);
-      setState(() {
-        _hasConnectionError = true;
-      });
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
-    }
-  }
-
-  // Libera recursos antes de abrir a câmera para evitar conflitos
-  Future<void> _disposeResourcesBeforeCamera() async {
-    try {
-      // Pausar o WebView para evitar conflitos com a câmera
-      if (_webViewController != null) {
-        debugPrint('Pausando WebView temporariamente');
-        // Injetar JavaScript para pausar mídias e liberar recursos
-        await _webViewController.runJavaScript('''
-          (function() {
-            try {
-              // Pausar todos os vídeos
-              document.querySelectorAll('video').forEach(function(video) {
-                if (!video.paused) video.pause();
-              });
-              
-              // Pausar todos os áudios
-              document.querySelectorAll('audio').forEach(function(audio) {
-                if (!audio.paused) audio.pause();
-              });
-              
-              // Pausar elementos com API de mídia que possam estar usando a câmera
-              try {
-                if (window._mediaStreamTracks) {
-                  window._mediaStreamTracks.forEach(function(track) {
-                    track.stop();
-                  });
-                }
-                
-                // Limpar qualquer receptor de eventos que possa estar em uso
-                if (window._eventListeners) {
-                  window._eventListeners.forEach(function(listener) {
-                    if (listener.element && listener.type && listener.handler) {
-                      listener.element.removeEventListener(listener.type, listener.handler);
-                    }
-                  });
-                  window._eventListeners = [];
-                }
-                
-                // Forçar coleta de lixo nos navegadores que suportam
-                if (window.gc) {
-                  window.gc();
-                }
-              } catch(e) {
-                console.error("Erro ao parar media tracks:", e);
-              }
-              
-              console.log('Recursos da web pausados temporariamente');
-            } catch(e) {
-              console.error('Erro ao liberar recursos web:', e);
-            }
-          })();
-        ''');
-      }
-
-      // Pequena pausa para garantir que recursos sejam liberados
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      // Usar a nova função de limpeza de memória
-      await _clearMemoryBeforeCameraUse();
-    } catch (e) {
-      debugPrint('Erro ao liberar recursos antes da câmera: $e');
-    }
-  }
-
-  // Registrar erro de câmera para controle
-  Future<void> _registerCameraError(String errorMessage) async {
-    try {
-      await _webViewController.runJavaScript('''
-        (function() {
-          const currentCount = parseInt(localStorage.getItem('camera_error_count') || '0');
-          localStorage.setItem('camera_error_count', (currentCount + 1).toString());
-          localStorage.setItem('last_camera_error_time', Date.now().toString());
-          localStorage.setItem('last_camera_error', "${errorMessage.replaceAll('"', '\\"')}");
-          console.error('Erro de câmera registrado: ${errorMessage.replaceAll('"', '\\"')}');
-        })();
-      ''');
-
-      // Depois de vários erros, marcar que precisa reiniciar
-      final errorCount = int.tryParse(await _webViewController
-              .runJavaScriptReturningResult(
-                  'localStorage.getItem("camera_error_count") || "0"')
-              .then((value) => value.toString())) ??
-          0;
-
-      if (errorCount > 3) {
-        _markReceiverResetRequired();
-      }
-    } catch (e) {
-      debugPrint('Erro ao registrar erro de câmera: $e');
-    }
-  }
-
-  Future<bool> _testApiConnection() async {
-    try {
-      final response = await http.get(
-        Uri.parse('http://seu-dominio-ddns.com:3000/api/test'),
-      );
-
-      if (response.statusCode == 200) {
-        debugPrint('API está online: ${response.body}');
-        return true;
-      } else {
-        debugPrint('API retornou erro: ${response.statusCode}');
-        return false;
-      }
-    } catch (e) {
-      debugPrint('Erro ao conectar na API: $e');
-      return false;
-    }
-  }
-
-  void _startQRCodeReadingWithTimeout() async {
-    await _resetCameraState(); // Resetar o estado da câmera antes de abrir
-
-    // Desabilitar health check durante o uso da câmera
-    _healthCheckTimer?.cancel();
-
-    // Desabilitar diagnósticos na página atual
-    try {
-      await _webViewController
-          .runJavaScript("window.disableDiagnostics = true;");
-    } catch (e) {
-      debugPrint('Erro ao desabilitar diagnósticos: $e');
-    }
-
-    await _showCameraModal();
-
-    // Reativar health check após uso da câmera (com delay para garantir que a página está carregada)
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted) {
-        try {
-          _webViewController
-              .runJavaScript("window.disableDiagnostics = false;");
-          _startPeriodicHealthCheck();
-        } catch (e) {
-          debugPrint('Erro ao reativar diagnósticos: $e');
-        }
-      }
-    });
-  }
-
-  // Adicionar função para testar o Sentry
-  Future<void> _testSentryCapture() async {
-    try {
-      // Criar um evento de teste usando o Logger
-      Logger.info(
-        'Teste manual do Logger/Sentry',
-        extra: {'source': 'manual_test'},
-        category: 'test',
-      );
-
-      // Mostrar mensagem de sucesso
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Evento de teste enviado para o Sentry com sucesso!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      // Simular um erro para testar captura de exceções
-      // Comentado para não criar erros acidentais durante uso normal
-      // throw Exception('Exceção de teste para o Sentry');
-    } catch (e, stackTrace) {
-      // Capturar exceção com stack trace usando o Logger
-      await Logger.captureException(
-        e,
-        stackTrace: stackTrace,
-        category: 'test',
-      );
-
-      // Mostrar mensagem de erro capturado
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Erro de teste capturado e enviado para o Sentry!'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-    }
-  }
-}
-
-class OrientationView extends StatelessWidget {
-  final VoidCallback onOrientationComplete;
-
-  const OrientationView({
-    Key? key,
-    required this.onOrientationComplete,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.screen_rotation,
-            size: 80,
-            color: Colors.blue,
-          ),
-          const SizedBox(height: 20),
-          const Text(
-            'Gire o dispositivo para o modo paisagem',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 40),
-          ElevatedButton(
-            onPressed: onOrientationComplete,
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 32,
-                vertical: 16,
-              ),
-            ),
-            child: const Text('Continuar'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class CompletionView extends StatelessWidget {
-  final Function(bool) isShowingImageCapture;
-  final File? capturedImage;
-  final Function(File) onImageCaptured;
-  final VoidCallback onSendComplete;
-
-  const CompletionView({
-    Key? key,
-    required this.isShowingImageCapture,
-    required this.capturedImage,
-    required this.onImageCaptured,
-    required this.onSendComplete,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        children: [
-          const Text(
-            'Certifique-se de que as seguintes informações estão visíveis:',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 20),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: const [
-              Text('Valor'),
-              Text('Data'),
-              Text('Loja'),
-            ],
-          ),
-          const SizedBox(height: 20),
-          if (capturedImage != null)
-            Expanded(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.file(
-                  capturedImage!,
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () {
-                    isShowingImageCapture(true);
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.blue,
-                    side: const BorderSide(color: Colors.blue),
-                  ),
-                  child: const Text('Nova Foto'),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: onSendComplete,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Enviar'),
-                ),
-              ),
-            ],
-          ),
-        ],
       ),
     );
   }
@@ -2825,6 +1793,7 @@ class QRViewExample extends StatelessWidget {
     );
   }
 }
+ fix-ios-compatibility
 
 // Função para comprimir e redimensionar a imagem
 // Implementa o algoritmo de redimensionamento similar ao fornecido no código TypeScript:
@@ -2909,3 +1878,4 @@ Future<Uint8List> compressAndResizeImage(File imageFile,
     throw Exception('Falha ao processar imagem: $e');
   }
 }
+
