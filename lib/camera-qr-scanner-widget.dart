@@ -3,9 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:camera/camera.dart';
-import 'dart:typed_data';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
@@ -14,10 +12,10 @@ class CameraWithQRScanner extends StatefulWidget {
   final Function(String) onPhotoTaken;
 
   const CameraWithQRScanner({
-    Key? key,
+    super.key,
     required this.onQRCodeDetected,
     required this.onPhotoTaken,
-  }) : super(key: key);
+  });
 
   @override
   State<CameraWithQRScanner> createState() => _CameraWithQRScannerState();
@@ -34,15 +32,15 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
   static const preferredCameraDirection = CameraLensDirection.back;
 
   // Estados
-  bool _isQRMode = false; // Começar no modo câmera por padrão
+  final bool _isQRMode = false; // Começar no modo câmera por padrão
   bool _isProcessing = false;
   bool _isCameraInitialized = false;
   bool _hasCameraError = false;
   bool _previewReady = false;
-  bool _attemptingPreviewFix = false;
-  int _previewRetryCount = 0;
+  final bool _attemptingPreviewFix = false;
+  final int _previewRetryCount = 0;
   bool _isQRScannerReady = false;
-  bool _initialResetPerformed = false;
+  final bool _initialResetPerformed = false;
 
   // Controle de segurança para receivers
   bool _hasTooManyReceiversError = false;
@@ -352,7 +350,7 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
         }
 
         debugPrint('❌ Erro ao criar controlador da câmera: $e');
-        throw e; // Repassar erro para tratamento na função chamadora
+        rethrow; // Repassar erro para tratamento na função chamadora
       }
     } catch (e) {
       debugPrint('❌ Erro durante inicialização da câmera: $e');
@@ -370,7 +368,7 @@ class _CameraWithQRScannerState extends State<CameraWithQRScanner>
       }
 
       // Repassar erro
-      throw e;
+      rethrow;
     }
   }
 

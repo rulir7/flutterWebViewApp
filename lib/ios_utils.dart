@@ -18,10 +18,8 @@ class IOSUtils {
       await controller.setExposureMode(ExposureMode.auto);
 
       // Ativar flash automático se disponível
-      if (controller.value.flashMode != null) {
-        await controller.setFlashMode(FlashMode.auto);
-      }
-
+      await controller.setFlashMode(FlashMode.auto);
+    
       // Configurações específicas para iOS são efetivamente aplicadas
       debugPrint('✅ Configurações específicas do iOS aplicadas à câmera');
     } catch (e) {

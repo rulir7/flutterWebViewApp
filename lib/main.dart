@@ -3,7 +3,6 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
@@ -308,7 +307,7 @@ class MyApp extends StatelessWidget {
 
 // Tela para solicitar que o usuário reinicie o aplicativo
 class AppResetRequiredScreen extends StatelessWidget {
-  const AppResetRequiredScreen({Key? key}) : super(key: key);
+  const AppResetRequiredScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -383,7 +382,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   bool _hasConnectionError = false;
   bool _isOffline = false;
   int _healthCheckFailCount = 0;
-  int _maxFailedHealthChecks = 3;
+  final int _maxFailedHealthChecks = 3;
   DateTime? _lastReload;
   bool _isOrientationShown = true;
   bool _isProcessCompleted = false;
@@ -926,21 +925,19 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
             await _webViewController.runJavaScriptReturningResult(basicScript);
 
         // Processar resultado básico
-        if (basicResult != null) {
-          final String basicJson = basicResult.toString();
+        final String basicJson = basicResult.toString();
 
-          if (basicJson != "null" && basicJson.isNotEmpty) {
-            try {
-              diagnostics = Map<String, dynamic>.from(jsonDecode(basicJson));
-              debugPrint('Diagnóstico básico WebView: $basicJson');
-            } catch (e) {
-              debugPrint('Erro ao decodificar diagnóstico básico: $e');
-              // Se não conseguimos processar o básico, desistimos
-              return;
-            }
+        if (basicJson != "null" && basicJson.isNotEmpty) {
+          try {
+            diagnostics = Map<String, dynamic>.from(jsonDecode(basicJson));
+            debugPrint('Diagnóstico básico WebView: $basicJson');
+          } catch (e) {
+            debugPrint('Erro ao decodificar diagnóstico básico: $e');
+            // Se não conseguimos processar o básico, desistimos
+            return;
           }
         }
-      } catch (e) {
+            } catch (e) {
         debugPrint('Erro ao executar diagnóstico básico: $e');
         return;
       }
@@ -957,24 +954,22 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         final advancedResult = await _webViewController
             .runJavaScriptReturningResult(advancedScript);
 
-        if (advancedResult != null) {
-          final String advancedJson = advancedResult.toString();
+        final String advancedJson = advancedResult.toString();
 
-          if (advancedJson != "null" && advancedJson.isNotEmpty) {
-            try {
-              final Map<String, dynamic> advancedData =
-                  Map<String, dynamic>.from(jsonDecode(advancedJson));
+        if (advancedJson != "null" && advancedJson.isNotEmpty) {
+          try {
+            final Map<String, dynamic> advancedData =
+                Map<String, dynamic>.from(jsonDecode(advancedJson));
 
-              // Mesclar dados avançados com o diagnóstico básico
-              diagnostics.addAll(advancedData);
-              debugPrint('Diagnóstico avançado WebView: $advancedJson');
-            } catch (e) {
-              debugPrint('Erro ao decodificar diagnóstico avançado: $e');
-              // Podemos continuar apenas com o básico
-            }
+            // Mesclar dados avançados com o diagnóstico básico
+            diagnostics.addAll(advancedData);
+            debugPrint('Diagnóstico avançado WebView: $advancedJson');
+          } catch (e) {
+            debugPrint('Erro ao decodificar diagnóstico avançado: $e');
+            // Podemos continuar apenas com o básico
           }
         }
-      } catch (e) {
+            } catch (e) {
         debugPrint('Erro ao executar diagnóstico avançado: $e');
         // Podemos continuar apenas com o básico
       }
@@ -987,7 +982,7 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       // que estamos tentando consertar
       Logger.info('Diagnóstico do WebView concluído',
           category: 'webview.diagnostics', extra: diagnostics);
-    } catch (e, stackTrace) {
+    } catch (e) {
       // Evitar enviar exceção para o Sentry para não criar loop
       debugPrint('⚠️ Erro ao realizar diagnóstico do WebView: $e');
 
@@ -2475,20 +2470,18 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       // Pequeno atraso para garantir que a câmera foi fechada completamente
       await Future.delayed(const Duration(milliseconds: 500));
 
-      if (_webViewController != null) {
-        debugPrint('Restaurando WebView após uso da câmera');
+      debugPrint('Restaurando WebView após uso da câmera');
 
-        // Recarregar completamente a WebView para garantir liberação de todos os receptores
-        await _webViewController.reload();
+      // Recarregar completamente a WebView para garantir liberação de todos os receptores
+      await _webViewController.reload();
 
-        // Ou injetar JavaScript para retomar mídias se necessário
-        await _webViewController.runJavaScript('''
-          (function() {
-            console.log('WebView restaurado após uso da câmera');
-          })();
-        ''');
-      }
-    } catch (e) {
+      // Ou injetar JavaScript para retomar mídias se necessário
+      await _webViewController.runJavaScript('''
+        (function() {
+          console.log('WebView restaurado após uso da câmera');
+        })();
+      ''');
+        } catch (e) {
       debugPrint('Erro ao restaurar recursos após câmera: $e');
     }
   }
@@ -2523,56 +2516,54 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   Future<void> _disposeResourcesBeforeCamera() async {
     try {
       // Pausar o WebView para evitar conflitos com a câmera
-      if (_webViewController != null) {
-        debugPrint('Pausando WebView temporariamente');
-        // Injetar JavaScript para pausar mídias e liberar recursos
-        await _webViewController.runJavaScript('''
-          (function() {
+      debugPrint('Pausando WebView temporariamente');
+      // Injetar JavaScript para pausar mídias e liberar recursos
+      await _webViewController.runJavaScript('''
+        (function() {
+          try {
+            // Pausar todos os vídeos
+            document.querySelectorAll('video').forEach(function(video) {
+              if (!video.paused) video.pause();
+            });
+            
+            // Pausar todos os áudios
+            document.querySelectorAll('audio').forEach(function(audio) {
+              if (!audio.paused) audio.pause();
+            });
+            
+            // Pausar elementos com API de mídia que possam estar usando a câmera
             try {
-              // Pausar todos os vídeos
-              document.querySelectorAll('video').forEach(function(video) {
-                if (!video.paused) video.pause();
-              });
-              
-              // Pausar todos os áudios
-              document.querySelectorAll('audio').forEach(function(audio) {
-                if (!audio.paused) audio.pause();
-              });
-              
-              // Pausar elementos com API de mídia que possam estar usando a câmera
-              try {
-                if (window._mediaStreamTracks) {
-                  window._mediaStreamTracks.forEach(function(track) {
-                    track.stop();
-                  });
-                }
-                
-                // Limpar qualquer receptor de eventos que possa estar em uso
-                if (window._eventListeners) {
-                  window._eventListeners.forEach(function(listener) {
-                    if (listener.element && listener.type && listener.handler) {
-                      listener.element.removeEventListener(listener.type, listener.handler);
-                    }
-                  });
-                  window._eventListeners = [];
-                }
-                
-                // Forçar coleta de lixo nos navegadores que suportam
-                if (window.gc) {
-                  window.gc();
-                }
-              } catch(e) {
-                console.error("Erro ao parar media tracks:", e);
+              if (window._mediaStreamTracks) {
+                window._mediaStreamTracks.forEach(function(track) {
+                  track.stop();
+                });
               }
               
-              console.log('Recursos da web pausados temporariamente');
+              // Limpar qualquer receptor de eventos que possa estar em uso
+              if (window._eventListeners) {
+                window._eventListeners.forEach(function(listener) {
+                  if (listener.element && listener.type && listener.handler) {
+                    listener.element.removeEventListener(listener.type, listener.handler);
+                  }
+                });
+                window._eventListeners = [];
+              }
+              
+              // Forçar coleta de lixo nos navegadores que suportam
+              if (window.gc) {
+                window.gc();
+              }
             } catch(e) {
-              console.error('Erro ao liberar recursos web:', e);
+              console.error("Erro ao parar media tracks:", e);
             }
-          })();
-        ''');
-      }
-
+            
+            console.log('Recursos da web pausados temporariamente');
+          } catch(e) {
+            console.error('Erro ao liberar recursos web:', e);
+          }
+        })();
+      ''');
+    
       // Pequena pausa para garantir que recursos sejam liberados
       await Future.delayed(const Duration(milliseconds: 300));
 
@@ -2704,9 +2695,9 @@ class OrientationView extends StatelessWidget {
   final VoidCallback onOrientationComplete;
 
   const OrientationView({
-    Key? key,
+    super.key,
     required this.onOrientationComplete,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2751,12 +2742,12 @@ class CompletionView extends StatelessWidget {
   final VoidCallback onSendComplete;
 
   const CompletionView({
-    Key? key,
+    super.key,
     required this.isShowingImageCapture,
     required this.capturedImage,
     required this.onImageCaptured,
     required this.onSendComplete,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2830,8 +2821,7 @@ class CompletionView extends StatelessWidget {
 class QRViewExample extends StatelessWidget {
   final Function(String) onCodeScanned;
 
-  const QRViewExample({required this.onCodeScanned, Key? key})
-      : super(key: key);
+  const QRViewExample({required this.onCodeScanned, super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -2882,7 +2872,7 @@ Future<Uint8List> compressAndResizeImage(File imageFile,
       targetWidth = targetWidth ~/ 1.5; // Reduz 33% a mais na largura
       targetHeight = targetHeight ~/ 1.5; // Reduz 33% a mais na altura
       debugPrint(
-          '📊 Aplicando compressão extra para iOS: ${targetWidth}x${targetHeight}');
+          '📊 Aplicando compressão extra para iOS: ${targetWidth}x$targetHeight');
     }
 
     Logger.info('Redimensionando imagem:',
@@ -2923,7 +2913,7 @@ Future<Uint8List> compressAndResizeImage(File imageFile,
         category: 'image_processing');
 
     return Uint8List.fromList(compressedBytes);
-  } catch (e, stackTrace) {
+  } catch (e) {
     // Capturar e logar qualquer erro durante o processamento da imagem
     Logger.error('Erro ao comprimir e redimensionar imagem: $e',
         extra: {
