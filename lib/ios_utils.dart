@@ -19,7 +19,7 @@ class IOSUtils {
 
       // Ativar flash automático se disponível
       await controller.setFlashMode(FlashMode.auto);
-    
+
       // Configurações específicas para iOS são efetivamente aplicadas
       debugPrint('✅ Configurações específicas do iOS aplicadas à câmera');
     } catch (e) {
@@ -108,15 +108,14 @@ class IOSUtils {
     if (!Platform.isIOS) return false;
 
     try {
-      // Verificar se estamos no iOS 14 ou superior (melhor compatibilidade)
+      // Verificar se estamos no iOS 15.5 ou superior (melhor compatibilidade)
       final String version = Platform.operatingSystemVersion;
-      final bool isIOS14OrHigher = version.contains('14.') ||
-          version.contains('15.') ||
+      final bool isIOS155OrHigher = version.contains('15.5') ||
           version.contains('16.') ||
           version.contains('17.');
 
-      if (!isIOS14OrHigher) {
-        debugPrint('⚠️ iOS: Versão anterior ao iOS 14 detectada: $version');
+      if (!isIOS155OrHigher) {
+        debugPrint('⚠️ iOS: Versão anterior ao iOS 15.5 detectada: $version');
         Logger.warning('Versão de iOS potencialmente incompatível',
             category: 'ios_compatibility', extra: {'version': version});
         return true;

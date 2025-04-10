@@ -41,6 +41,10 @@
 	<string>Este aplicativo precisa de permissão para salvar fotos na galeria</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Este aplicativo precisa de acesso à galeria para selecionar fotos</string>
+	<key>NSFileProviderDomainUsageDescription</key>
+	<string>Este aplicativo precisa acessar arquivos compartilhados para processar imagens</string>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -61,6 +65,8 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>
 </plist>

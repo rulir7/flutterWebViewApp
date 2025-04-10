@@ -42,5 +42,19 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    
+    # Garantir que a versão mínima do iOS está configurada para 15.5
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
+      
+      # Desabilitar validações de recursos para melhor compatibilidade
+      config.build_settings['VALIDATE_WORKSPACE'] = 'YES'
+      
+      # Configurações para melhorar a performance no iOS
+      config.build_settings['ENABLE_BITCODE'] = 'NO'
+      
+      # Remover warnings de APIs obsoletas no iOS 15+
+      config.build_settings['CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER'] = 'NO'
+    end
   end
 end
