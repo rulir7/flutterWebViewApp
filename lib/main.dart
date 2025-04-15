@@ -17,7 +17,8 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:http_parser/http_parser.dart';
-import './ios_utils.dart'; // Importando utilitários para iOS
+import './ios_utils.dart'; 
+import 'package:camera/camera.dart';
 
 // URL para enviar dados
 const String apiUrl = 'http://rulir.ddns.net:3003/api/upload';
@@ -388,13 +389,18 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   bool _isProcessCompleted = false;
   File? _capturedImage;
   bool _isShowingImageCapture = false;
+  CameraController? _cameraController;
 
   @override
   void initState() {
     super.initState();
+    
+    // Add the camera controller property if it doesn't exist
+    
     WidgetsBinding.instance.addObserver(this);
     _requestPermissions().then((_) {
       _initializeWebView();
+      _initializeCamera(); // Call camera initialization separately
       Future.delayed(const Duration(milliseconds: 500), () {
         if (mounted) {
           _loadHtmlContent();
@@ -402,6 +408,33 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
         }
       });
     });
+  }
+  
+  // Add a new method to initialize the camera
+  Future<void> _initializeCamera() async {
+    try {
+      bool hasCameraPermission = await _checkCameraPermission();
+      if (!hasCameraPermission) {
+        print('Permissão de câmera negada');
+        return;
+      }
+      
+      final cameras = await availableCameras();
+      if (cameras.isNotEmpty) {
+        final firstCamera = cameras.first;
+        _cameraController = CameraController(
+          firstCamera,
+          ResolutionPreset.high,
+        );
+        if (_cameraController != null) {
+          await _cameraController!.initialize();
+        }
+      } else {
+        print('Nenhuma câmera disponível');
+      }
+    } catch (e) {
+      print('Erro ao inicializar câmera: $e');
+    }
   }
 
   void _initializeWebView() {
@@ -990,6 +1023,14 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
       Logger.warning('Erro ao realizar diagnóstico do WebView: $e',
           category: 'webview', extra: {'errorDetails': e.toString()});
     }
+  }
+
+  Future<bool> _checkCameraPermission() async {
+    var status = await Permission.camera.status;
+    if (status.isDenied) {
+      status = await Permission.camera.request();
+    }
+    return status.isGranted;
   }
 
   Future<void> _requestPermissions() async {
