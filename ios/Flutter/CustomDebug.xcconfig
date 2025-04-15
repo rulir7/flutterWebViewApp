@@ -1,0 +1,6 @@
+#include "Debug.xcconfig"
+#include "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
+
+PROVISIONING_PROFILE_SPECIFIER=
+CODE_SIGN_IDENTITY=Apple Development
+DEVELOPMENT_TEAM=3RHG2Z36NY 

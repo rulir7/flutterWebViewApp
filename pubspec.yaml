@@ -12,7 +12,7 @@ dependencies:
   webview_flutter: ^4.10.0
   webview_flutter_android: ^4.2.0
   webview_flutter_wkwebview: ^3.18.4
-  permission_handler: ^10.2.0
+  permission_handler: ^11.3.0
   url_launcher: ^6.0.20
   mobile_scanner: 6.0.7
   image_picker: ^1.0.7

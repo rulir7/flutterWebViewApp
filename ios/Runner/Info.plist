@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Bemall Promoções</string>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Bemall Promoções</string>
+	<string>bemall_promocores</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -32,11 +32,11 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Este aplicativo precisa de acesso à câmera para escanear códigos QR e tirar fotos</string>
+	<string>Precisamos acessar sua câmera para escanear códigos QR e tomar fotos. Por favor, conceda permissão para usar todas as funcionalidades do aplicativo.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Este aplicativo pode precisar de sua localização para melhorar as promoções</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Este aplicativo pode precisar de acesso ao microfone para recursos de vídeo</string>
+	<string>Precisamos acessar seu microfone para gravar vídeos. Por favor, conceda permissão para usar todas as funcionalidades do aplicativo.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Este aplicativo precisa de permissão para salvar fotos na galeria</string>
 	<key>NSPhotoLibraryUsageDescription</key>

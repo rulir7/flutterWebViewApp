@@ -993,31 +993,112 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
   }
 
   Future<void> _requestPermissions() async {
-    await [
-      Permission.camera,
-      Permission.storage,
-    ].request();
+    try {
+      // Solicitar permissão da câmera explicitamente para garantir que o diálogo apareça
+      debugPrint('📱 Solicitando permissão da câmera explicitamente...');
+      final cameraStatus = await Permission.camera.request();
+      debugPrint('Status da permissão da câmera após solicitação: $cameraStatus');
+      
+      if (!cameraStatus.isGranted) {
+        // Se a permissão foi negada permanentemente, mostrar um diálogo e abrir configurações
+        if (cameraStatus.isPermanentlyDenied) {
+          if (mounted) {
+            showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (BuildContext context) {
+                return AlertDialog(
+                  title: const Text('Permissão Necessária'),
+                  content: const Text(
+                      'A permissão da câmera foi negada permanentemente. Para utilizar esta função, é necessário habilitar o acesso à câmera nas configurações do dispositivo.'),
+                  actions: <Widget>[
+                    TextButton(
+                      child: const Text('Cancelar'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                    TextButton(
+                      child: const Text('Abrir Configurações'),
+                      onPressed: () {
+                        openAppSettings();
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  ],
+                );
+              },
+            );
+          }
+        } else {
+          // Se foi negada temporariamente, mostrar mensagem simples
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Permissão da câmera é necessária para escanear QR codes.')),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Erro ao solicitar permissões: $e');
+    }
   }
 
   Future<bool> _checkPermissions() async {
-    var cameraStatus = await Permission.camera.status;
-
-    if (!cameraStatus.isGranted) {
-      var results = [
-        Permission.camera.request(),
-      ];
-
-      if ((await Future.wait(results)).every((status) => status.isGranted)) {
-        return true;
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Permissões de câmera são necessárias.')),
-        );
+    try {
+      debugPrint('📱 Verificando e solicitando permissão da câmera diretamente...');
+      // Solicitar permissão diretamente em vez de apenas verificar o status
+      final result = await Permission.camera.request();
+      debugPrint('Status da permissão após solicitação direta: $result');
+      
+      if (!result.isGranted) {
+        // Se a permissão já foi permanentemente negada
+        if (result.isPermanentlyDenied) {
+          if (mounted) {
+            showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (BuildContext context) {
+                return AlertDialog(
+                  title: const Text('Permissão Necessária'),
+                  content: const Text(
+                      'A permissão da câmera foi negada permanentemente. Para utilizar esta função, é necessário habilitar o acesso à câmera nas configurações do dispositivo.'),
+                  actions: <Widget>[
+                    TextButton(
+                      child: const Text('Cancelar'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                    TextButton(
+                      child: const Text('Abrir Configurações'),
+                      onPressed: () {
+                        openAppSettings();
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  ],
+                );
+              },
+            );
+          }
+          return false;
+        }
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Permissão da câmera é necessária para escanear QR codes.'),
+            ),
+          );
+        }
         return false;
       }
+      return true;
+    } catch (e) {
+      debugPrint('Erro ao verificar permissões: $e');
+      return false;
     }
-    return true;
   }
 
   // Função para processar mensagens recebidas do JavaScript
@@ -2117,12 +2198,48 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     try {
       debugPrint('Iniciando processo de abertura da câmera...');
 
-      // Verificar primeiro se temos permissão
+      // Solicitar permissão da câmera explicitamente
+      debugPrint('📸 Solicitando permissão da câmera antes de abrir o modal...');
       final PermissionStatus cameraPermissionStatus =
           await Permission.camera.request();
       debugPrint('Status da permissão da câmera: $cameraPermissionStatus');
 
       if (!cameraPermissionStatus.isGranted) {
+        // Se a permissão já foi permanentemente negada
+        if (cameraPermissionStatus.isPermanentlyDenied) {
+          if (mounted) {
+            showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (BuildContext context) {
+                return AlertDialog(
+                  title: const Text('Permissão Necessária'),
+                  content: const Text(
+                      'A permissão da câmera foi negada permanentemente. Para utilizar esta função, é necessário habilitar o acesso à câmera nas configurações do dispositivo.'),
+                  actions: <Widget>[
+                    TextButton(
+                      child: const Text('Cancelar'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                    TextButton(
+                      child: const Text('Abrir Configurações'),
+                      onPressed: () {
+                        openAppSettings();
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  ],
+                );
+              },
+            );
+          }
+          _logError('Permissão de câmera negada permanentemente pelo usuário');
+          return;
+        }
+        
+        // Se não for permanentemente negada, mostrar mensagem
         _logError('Permissão de câmera negada pelo usuário');
         _showError(
             'É necessário permitir o acesso à câmera para usar esta função.');
