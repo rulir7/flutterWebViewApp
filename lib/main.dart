@@ -398,6 +398,16 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     // Add the camera controller property if it doesn't exist
     
     WidgetsBinding.instance.addObserver(this);
+    // Test camera permissions explicitly early in app startup
+    _testCameraAccess();
+    
+    // For iOS 18+ specifically, try an immediate camera init after a brief delay
+    if (Platform.isIOS) {
+      Future.delayed(const Duration(milliseconds: 800), () {
+        _forceIOSCameraPermissionPrompt();
+      });
+    }
+    
     _requestPermissions().then((_) {
       _initializeWebView();
       _initializeCamera(); // Call camera initialization separately
@@ -410,6 +420,97 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
     });
   }
   
+  // Additional method specifically for iOS 18+ to force camera permission prompt
+  Future<void> _forceIOSCameraPermissionPrompt() async {
+    debugPrint('📱 iOS: Trying forceful camera permission request for iOS 18+');
+    
+    try {
+      // First, show a dialog explaining we need camera access
+      if (mounted) {
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            title: const Text('Permissão da Câmera'),
+            content: const Text('Este aplicativo precisa de acesso à câmera para escanear QR codes e capturar fotos. Por favor, permita o acesso na próxima tela.'),
+            actions: [
+              TextButton(
+                child: const Text('OK'),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+            ],
+          ),
+        );
+      }
+      
+      // Then immediately request camera permission and try to initialize it
+      await Permission.camera.request();
+      
+      // Immediately try to access cameras
+      final cameras = await availableCameras();
+      if (cameras.isNotEmpty) {
+        // Create, initialize and immediately dispose a camera controller
+        // This should trigger iOS permission prompt even on iOS 18.1+
+        final controller = CameraController(
+          cameras.first,
+          ResolutionPreset.low,
+          enableAudio: false,
+        );
+        
+        await controller.initialize();
+        await controller.dispose();
+        debugPrint('📱 iOS: Camera successfully initialized and disposed');
+      }
+    } catch (e) {
+      debugPrint('📱 iOS: Error during forced camera permission attempt: $e');
+    }
+  }
+
+  // A dedicated test method to explicitly request camera access
+  Future<void> _testCameraAccess() async {
+    try {
+      debugPrint('🎥 Testing camera access explicitly on app startup');
+      
+      // For iOS 18+, we need a more straightforward approach
+      if (Platform.isIOS) {
+        // First request camera permission without initializing camera
+        await Permission.camera.request();
+        debugPrint('🎥 iOS: Requested camera permission directly');
+        
+        // Directly try to access the camera to force a permission dialog
+        try {
+          // Make a direct attempt to capture a test image - this forces iOS to prompt
+          // We don't need to actually take a photo, just initialize the camera enough
+          // to trigger iOS permission systems
+          final cameras = await availableCameras();
+          if (cameras.isNotEmpty) {
+            final testController = CameraController(
+              cameras.first,
+              ResolutionPreset.low,
+              enableAudio: false,
+            );
+            debugPrint('🎥 iOS: Initializing camera to trigger permission dialog');
+            await testController.initialize();
+            debugPrint('🎥 iOS: Camera initialized successfully');
+            await testController.dispose();
+          } else {
+            debugPrint('🎥 iOS: No cameras available');
+          }
+        } catch (e) {
+          debugPrint('🎥 iOS: Error initializing camera for permission: $e');
+        }
+      } else {
+        // For Android, just request permission
+        final cameraPermission = await Permission.camera.request();
+        debugPrint('🎥 Android: Camera permission status: $cameraPermission');
+      }
+    } catch (e) {
+      debugPrint('🎥 Error in camera test: $e');
+    }
+  }
+
   // Add a new method to initialize the camera
   Future<void> _initializeCamera() async {
     try {
@@ -1035,10 +1136,25 @@ class WebViewDemoState extends State<WebViewDemo> with WidgetsBindingObserver {
 
   Future<void> _requestPermissions() async {
     try {
-      // Solicitar permissão da câmera explicitamente para garantir que o diálogo apareça
+      // Special handling for iOS 18+ which might have different permission behavior
+      debugPrint('📱 Platform: ${Platform.operatingSystem}, version: ${Platform.operatingSystemVersion}');
+      
+      // Try to request all permissions that might be needed
       debugPrint('📱 Solicitando permissão da câmera explicitamente...');
+      
+      // First check current status
+      final currentStatus = await Permission.camera.status;
+      debugPrint('Status atual da permissão da câmera: $currentStatus');
+      
+      // Force request even if previously denied
       final cameraStatus = await Permission.camera.request();
       debugPrint('Status da permissão da câmera após solicitação: $cameraStatus');
+      
+      // On iOS, also request photos permission which might help with camera access
+      if (Platform.isIOS) {
+        final photosStatus = await Permission.photos.request();
+        debugPrint('Status da permissão de fotos após solicitação: $photosStatus');
+      }
       
       if (!cameraStatus.isGranted) {
         // Se a permissão foi negada permanentemente, mostrar um diálogo e abrir configurações

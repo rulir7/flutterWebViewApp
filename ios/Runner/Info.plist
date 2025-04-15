@@ -31,8 +31,14 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dartobservatory._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>Precisamos acessar sua câmera para escanear códigos QR e tomar fotos. Por favor, conceda permissão para usar todas as funcionalidades do aplicativo.</string>
+	<string>O aplicativo precisa de acesso à câmera para escanear QR codes e capturar fotos. Por favor, permita o acesso à câmera.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Este aplicativo precisa de acesso à rede local para comunicação e melhor desempenho.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Este aplicativo pode precisar de sua localização para melhorar as promoções</string>
 	<key>NSMicrophoneUsageDescription</key>
